@@ -232,18 +232,18 @@ class LogEveryPow2State {
                 __FILE__, __LINE__)                                        \
                 .stream()
 
-#define REVERB_LOGGING_INTERNAL_STATEFUL_CONDITION(kind, condition, arg)   \
-  for (bool logging_internal_stateful_condition_do_log(condition);  \
-       logging_internal_stateful_condition_do_log;                  \
-       logging_internal_stateful_condition_do_log = false)          \
-    for (static ::deepmind::reverb::internal::Log##kind##State      \
-             logging_internal_stateful_condition_state;             \
-         logging_internal_stateful_condition_do_log &&              \
-         logging_internal_stateful_condition_state.ShouldLog(arg);  \
-         logging_internal_stateful_condition_do_log = false)        \
-      for (const uint32_t COUNTER ABSL_ATTRIBUTE_UNUSED =           \
-               logging_internal_stateful_condition_state.counter(); \
-           logging_internal_stateful_condition_do_log;              \
+#define REVERB_LOGGING_INTERNAL_STATEFUL_CONDITION(kind, condition, arg) \
+  for (bool logging_internal_stateful_condition_do_log(condition);       \
+       logging_internal_stateful_condition_do_log;                       \
+       logging_internal_stateful_condition_do_log = false)               \
+    for (static ::deepmind::reverb::internal::Log##kind##State           \
+             logging_internal_stateful_condition_state;                  \
+         logging_internal_stateful_condition_do_log &&                   \
+         logging_internal_stateful_condition_state.ShouldLog(arg);       \
+         logging_internal_stateful_condition_do_log = false)             \
+      for (const uint32_t COUNTER [[maybe_unused]] =                     \
+               logging_internal_stateful_condition_state.counter();      \
+           logging_internal_stateful_condition_do_log;                   \
            logging_internal_stateful_condition_do_log = false)
 
 #define REVERB_LOG_EVERY_N(level, n)                          \
