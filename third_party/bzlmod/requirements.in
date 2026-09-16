@@ -1,0 +1,8 @@
+absl-py
+dm-tree
+numpy
+packaging
+portpicker
+protobuf
+pybind11==3.0.1
+tensorflow==2.21.0

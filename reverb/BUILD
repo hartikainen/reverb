@@ -22,6 +22,8 @@ exports_files(["LICENSE"])
 reverb_pytype_strict_library(
     name = "reverb",
     srcs = ["__init__.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
     deps = [
         ":client",
         ":errors",
@@ -107,9 +109,9 @@ reverb_cc_shared_library(
     ),
     user_link_flags = select({
         "@platforms//os:macos": [
-            "-Wl,-undefined,dynamic_lookup",
             "-Wl,-exported_symbols_list,$(location :reverb_exported_symbols.lds)",
             "-Wl,-install_name,@rpath/libreverb.dylib",
+            "-Wl,-undefined,dynamic_lookup",
         ],
         "@platforms//os:linux": [
             "-Wl,--version-script,$(location :reverb_version_script.lds)",
