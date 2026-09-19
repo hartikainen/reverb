@@ -54,7 +54,7 @@ $ pip install dm-reverb-nightly
 
 ### Build from source
 
-[This guide](reverb/pip_package/README.md#how-to-develop-and-build-reverb-with-the-docker-containers)
+[This guide](reverb/pip_package/README.md)
 details how to build Reverb from source.
 
 #### Bzlmod source targets
@@ -64,9 +64,9 @@ TensorFlow `2.21.0`. It exposes the Python library `//reverb:reverb`
 and the server executable `//reverb/server_executable:server_main`:
 
 ```console
-bazel --noworkspace_rc --bazelrc=.bazelrc.bzlmod build \
+bazel build \
   //reverb:reverb //reverb/server_executable:server_main
-bazel --noworkspace_rc --bazelrc=.bazelrc.bzlmod test \
+bazel test \
   //reverb:pybind_test //reverb:trajectory_writer_test
 ```
 
@@ -75,15 +75,14 @@ and TensorFlow schema sources have checksums. The dependency declarations and
 build helpers are contained in this repository.
 
 A consuming Bazel module can depend on `@reverb//reverb:reverb`. Its root module
-must select Python `3.13` and apply the native version constraints and dependency
-patches declared by `single_version_override` in `MODULE.bazel`. Bazel ignores
-overrides declared by dependency modules. With Bazel `7.7.0`, copy the patch
-files from `third_party/bzlmod` into the consuming root and use root-local patch
-labels in those overrides.
+must select a supported Python toolchain and apply the native version constraints
+and dependency patches declared by `single_version_override` in `MODULE.bazel`.
+Bazel ignores overrides declared by dependency modules. Copy the patches from
+`third_party/bzlmod` into the consuming root and use root-local patch labels in
+those overrides. The consuming build also needs the gRPC settings in `.bazelrc`.
 
-Bzlmod also exposes `//reverb/pip_package/bzlmod:wheel`. The default
-`//reverb/pip_package:wheel` and `oss_build.sh` use `WORKSPACE`. See the
-[wheel build guide](reverb/pip_package/README.md#bzlmod-wheels) for both paths.
+Wheel packaging uses the same module graph as the source targets. See the
+[wheel build guide](reverb/pip_package/README.md).
 
 
 ### Reverb Releases

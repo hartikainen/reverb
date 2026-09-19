@@ -125,6 +125,6 @@ pybind11_repository(
     actual = "@pypi//pybind11:reverb_headers",
 )
 
-wheel_config_repository = use_repo_rule("//reverb/pip_package/bzlmod:wheel_config.bzl", "wheel_config_repository")
+wheel_config_repository = use_repo_rule("//reverb/pip_package:wheel_config.bzl", "wheel_config_repository")
 
 wheel_config_repository(name = "reverb_wheel_config")
