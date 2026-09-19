@@ -59,7 +59,7 @@ details how to build Reverb from source.
 
 #### Bzlmod source targets
 
-The Bzlmod source configuration selects Bazel `7.7.0`, Python `3.13`, and
+The Bzlmod source configuration selects Bazel `9.2.0`, Python `3.13`, and
 TensorFlow `2.21.0`. It exposes the Python library `//reverb:reverb`
 and the server executable `//reverb/server_executable:server_main`:
 
@@ -76,10 +76,17 @@ build helpers are contained in this repository.
 
 A consuming Bazel module can depend on `@reverb//reverb:reverb`. Its root module
 must select a supported Python toolchain and apply the native version constraints
-and dependency patches declared by `single_version_override` in `MODULE.bazel`.
-Bazel ignores overrides declared by dependency modules. Copy the patches from
-`third_party/bzlmod` into the consuming root and use root-local patch labels in
-those overrides. The consuming build also needs the gRPC settings in `.bazelrc`.
+and dependency patches declared by `single_version_override` and
+`archive_override` in `MODULE.bazel`. Bazel ignores overrides declared by
+dependency modules. Copy the patches from `third_party/bzlmod` into the consuming
+root and use root-local patch labels in those overrides. The consuming build
+also needs `--incompatible_autoload_externally=+@rules_cc` for the pinned native
+dependencies, and the gRPC settings in `.bazelrc`.
+
+The native Protobuf module `reverb_protobuf` matches TensorFlow's ABI. The
+`protobuf` module supplies Bazel's protocol rules and providers. Their versions
+are independent because upgrading build rules must not change TensorFlow's
+native runtime.
 
 Wheel packaging uses the same module graph as the source targets. See the
 [wheel build guide](reverb/pip_package/README.md).

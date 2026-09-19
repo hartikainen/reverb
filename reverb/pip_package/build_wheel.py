@@ -75,8 +75,6 @@ def main() -> None:
         plat_name=args.platform,
         python_tag=args.python_tag,
     )
-    # Pass the launcher's dependency paths to the build-backend subprocess.
-    env["PYTHONPATH"] = os.pathsep.join(sys.path)
     subprocess.run(
         [
             sys.executable, "-m", "build", "--wheel", "--no-isolation",

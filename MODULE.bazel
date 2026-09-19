@@ -8,7 +8,8 @@ bazel_dep(name = "rules_cc", version = "0.2.25")
 bazel_dep(name = "rules_python", version = "2.3.3")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "abseil-cpp", version = "20250814.1", repo_name = "com_google_absl")
-bazel_dep(name = "protobuf", version = "31.1", repo_name = "com_google_protobuf")
+bazel_dep(name = "protobuf", version = "35.1")
+bazel_dep(name = "reverb_protobuf", version = "31.1", repo_name = "com_google_protobuf")
 bazel_dep(name = "grpc", version = "1.74.0", repo_name = "com_github_grpc_grpc")
 bazel_dep(name = "googletest", version = "1.18.0", repo_name = "com_google_googletest")
 bazel_dep(name = "snappy", version = "1.2.1")
@@ -17,13 +18,38 @@ bazel_dep(name = "snappy", version = "1.2.1")
 single_version_override(
     module_name = "grpc",
     patch_strip = 1,
-    patches = ["//third_party/bzlmod:grpc_tensorflow.patch"],
+    patches = ["//third_party/bzlmod:grpc_protobuf.patch"],
     version = "1.74.0",
 )
 
+archive_override(
+    module_name = "reverb_protobuf",
+    integrity = "sha256-bgm7yVC6YMOnswKAIQzSha+NfY7V4KbtEBxyr/IujYg=",
+    patch_strip = 1,
+    patches = ["//third_party/bzlmod:protobuf_bazel.patch"],
+    strip_prefix = "protobuf-6.31.1",
+    urls = ["https://github.com/protocolbuffers/protobuf/archive/refs/tags/v6.31.1.zip"],
+)
+
 single_version_override(
-    module_name = "protobuf",
-    version = "31.1",
+    module_name = "protoc-gen-validate",
+    patch_strip = 1,
+    patches = ["//third_party/bzlmod:protoc_validate_bazel.patch"],
+    version = "1.2.1.bcr.1",
+)
+
+single_version_override(
+    module_name = "cel-spec",
+    patch_strip = 1,
+    patches = ["//third_party/bzlmod:cel_spec_bazel.patch"],
+    version = "0.15.0",
+)
+
+single_version_override(
+    module_name = "envoy_api",
+    patch_strip = 1,
+    patches = ["//third_party/bzlmod:envoy_api_bazel.patch"],
+    version = "0.0.0-20250128-4de3c74",
 )
 
 single_version_override(

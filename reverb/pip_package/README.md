@@ -66,4 +66,5 @@ TensorFlow's headers and shared library must agree with Reverb's native
 Abseil, gRPC, and Protobuf dependencies. Changing TensorFlow requires updating
 its Python lock entries, the schema archive in
 `third_party/bzlmod/repositories.bzl`, the native constraints in `MODULE.bazel`,
-and the metadata in `reverb_version.bzl`.
+and the metadata in `reverb_version.bzl`. The separate `protobuf` module supplies
+Bazel rules, while `reverb_protobuf` supplies the compatible native generators.
