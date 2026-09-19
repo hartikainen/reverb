@@ -278,10 +278,12 @@ def _rpath_linkopts(name):
     levels_to_root = native.package_name().count("/") + name.count("/")
     return select({
         "@platforms//os:macos": [
+            "-Wl,-rpath,@loader_path/%s/tensorflow" % "/".join([".."] * (levels_to_root + 1)),
             "-Wl,%s" % (_make_search_paths("@loader_path", levels_to_root),),
         ],
         "//conditions:default": [
             "-Wl,%s" % (_make_search_paths("$$ORIGIN", levels_to_root),),
+            "-Wl,-rpath,$$ORIGIN/%s/tensorflow" % "/".join([".."] * (levels_to_root + 1)),
         ],
     })
 

@@ -81,9 +81,9 @@ overrides declared by dependency modules. With Bazel `7.7.0`, copy the patch
 files from `third_party/bzlmod` into the consuming root and use root-local patch
 labels in those overrides.
 
-Wheel packaging uses the `WORKSPACE` configuration and the commands in the
-[wheel build guide](reverb/pip_package/README.md). The Bzlmod configuration covers
-source targets and tests, without migrating the wheel packaging rules.
+Bzlmod also exposes `//reverb/pip_package/bzlmod:wheel`. The default
+`//reverb/pip_package:wheel` and `oss_build.sh` use `WORKSPACE`. See the
+[wheel build guide](reverb/pip_package/README.md#bzlmod-wheels) for both paths.
 
 
 ### Reverb Releases

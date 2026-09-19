@@ -111,10 +111,12 @@ reverb_cc_shared_library(
         "@platforms//os:macos": [
             "-Wl,-exported_symbols_list,$(location :reverb_exported_symbols.lds)",
             "-Wl,-install_name,@rpath/libreverb.dylib",
+            "-Wl,-rpath,@loader_path/../tensorflow",
             "-Wl,-undefined,dynamic_lookup",
         ],
         "@platforms//os:linux": [
             "-Wl,--version-script,$(location :reverb_version_script.lds)",
+            "-Wl,-rpath,$$ORIGIN/../tensorflow",
         ],
         "//conditions:default": [],
     }),

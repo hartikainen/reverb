@@ -58,3 +58,11 @@ py_library(
         "@pypi//tensorflow",
     ],
 )
+
+config_setting(
+    name = "is_linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
