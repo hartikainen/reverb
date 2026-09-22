@@ -178,6 +178,31 @@ TEST(CellRef, GetDataFromUncompressdChunkerBuffer) {
   test::ExpectTensorEqual<int32_t>(got, AddBatchDimension(want));
 }
 
+TEST(CellRef, UncompressedLookupRejectsEvictedAndResetCells) {
+  auto chunker = MakeChunker({"0", tensorflow::DT_INT32, {1}}, 2, 2, false, true);
+  std::vector<std::shared_ptr<CellRef>> held;
+  for (int i = 0; i < 5; ++i) {
+    std::weak_ptr<CellRef> ref;
+    REVERB_ASSERT_OK(chunker->Append(
+        MakeConstantTensor<tensorflow::DT_INT32>({1}, i), {1, i * 3}, &ref));
+    held.push_back(ref.lock());
+  }
+  tensorflow::Tensor value;
+  for (int i = 0; i < 5; ++i) {
+    auto status = held[i]->GetData(&value);
+    EXPECT_EQ(status.ok(), i >= 3);
+    if (status.ok()) EXPECT_EQ(value.flat<int32_t>()(0), i);
+  }
+  chunker->Reset();
+  EXPECT_FALSE(held[0]->GetData(&value).ok());
+  std::weak_ptr<CellRef> replacement;
+  REVERB_ASSERT_OK(chunker->Append(
+      MakeConstantTensor<tensorflow::DT_INT32>({1}, 9), {2, 0}, &replacement));
+  EXPECT_FALSE(held[0]->GetData(&value).ok());
+  REVERB_ASSERT_OK(replacement.lock()->GetData(&value));
+  EXPECT_EQ(value.flat<int32_t>()(0), 9);
+}
+
 TEST(CellRef, GetDataFromChunk) {
   for (bool delta_encode : {true, false}) {
     internal::TensorSpec spec = {"0", tensorflow::DT_FLOAT, {3, 3}};

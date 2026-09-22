@@ -158,7 +158,7 @@ absl::Status Chunker::Append(const tensorflow::Tensor& tensor,
   // This should never fail due to dtype or shape differences, because the dtype
   // of tensors[j] is UNKNOWN and `shape` has the same number of elements as
   // `item`.
-  tensorflow::Tensor batched_tensor(tensor.dtype(), shape);
+  tensorflow::Tensor batched_tensor;
   REVERB_CHECK(batched_tensor.CopyFrom(tensor, shape));
   buffer_.push_back(std::move(batched_tensor));
 
@@ -205,7 +205,7 @@ absl::Status Chunker::AppendUncompressed(
   // This should never fail due to dtype or shape differences, because the dtype
   // of tensors[j] is UNKNOWN and `shape` has the same number of elements as
   // `item`.
-  tensorflow::Tensor batched_tensor(tensor.dtype(), shape);
+  tensorflow::Tensor batched_tensor;
   REVERB_CHECK(batched_tensor.CopyFrom(tensor, shape));
 
   uncompressed_data_.push_back(std::move(batched_tensor));
@@ -412,24 +412,20 @@ absl::Status Chunker::CopyUncompressedDataForCell(const CellRef* ref,
   // always fetch the data from the queue of uncompressed data.
   absl::MutexLock lock(mu_);
 
-  // We iterate backwards over the active references until we find `ref`
-  // to determine which position in the queue holds the data.
-  int negative_offset = 0;
-  for (auto it = active_refs_.crbegin(); it != active_refs_.crend(); it++) {
-    if (it->get() == ref) break;
-    negative_offset++;
-  }
-
-  int buffer_index = uncompressed_data_.size() - negative_offset - 1;
-  if (buffer_index < 0) {
+  if (active_refs_.empty()) {
     return absl::InternalError(
         "Data could not be found in buffer nor in finalized chunk.");
   }
-
-  tensorflow::TensorShape shape = uncompressed_data_[buffer_index].shape();
-  if (!out->CopyFrom(uncompressed_data_[buffer_index], shape)) {
-    return absl::InternalError("Unable to copy tensor from buffer.");
+  const uint32_t distance = static_cast<uint32_t>(active_refs_.back()->offset()) -
+                            static_cast<uint32_t>(ref->offset());
+  // Pointer identity rejects expired cells whose offsets are reused by `Reset`.
+  if (distance >= uncompressed_data_.size() ||
+      distance >= active_refs_.size() ||
+      active_refs_[active_refs_.size() - distance - 1].get() != ref) {
+    return absl::InternalError(
+        "Data could not be found in buffer nor in finalized chunk.");
   }
+  *out = uncompressed_data_[uncompressed_data_.size() - distance - 1];
 
   return absl::OkStatus();
 }
