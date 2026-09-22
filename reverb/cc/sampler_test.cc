@@ -24,20 +24,20 @@
 #include <utility>
 #include <vector>
 
-#include "grpcpp/client_context.h"
-#include "grpcpp/impl/call_op_set.h"
-#include "grpcpp/impl/codegen/call_op_set.h"
-#include "grpcpp/impl/codegen/status.h"
-#include "grpcpp/support/status.h"
-#include "grpcpp/support/sync_stream.h"
-#include "gmock/gmock.h"
-#include "gtest/gtest.h"
 #include "absl/base/thread_annotations.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "gmock/gmock.h"
+#include "grpcpp/client_context.h"
+#include "grpcpp/impl/call_op_set.h"
+#include "grpcpp/impl/codegen/call_op_set.h"
+#include "grpcpp/impl/codegen/status.h"
+#include "grpcpp/support/status.h"
+#include "grpcpp/support/sync_stream.h"
+#include "gtest/gtest.h"
 #include "reverb/cc/chunk_store.h"
 #include "reverb/cc/platform/logging.h"
 #include "reverb/cc/platform/status_matchers.h"
@@ -82,7 +82,8 @@ class FakeStream
 
   bool Read(SampleStreamResponse* response) override {
     if (!responses_.empty() && status_.ok()) {
-      *response = responses_.front();
+      REVERB_CHECK(
+          response->ParseFromString(responses_.front().SerializeAsString()));
       responses_.erase(responses_.begin());
       return true;
     }
@@ -221,6 +222,53 @@ SampleStreamResponse MakeResponse(int item_length, bool delta_encode = false,
   chunk_data->mutable_sequence_range()->set_end(data_length);
 
   return response;
+}
+
+std::vector<SampleStreamResponse> MakeMultiChunkResponses(uint64_t key,
+                                                          bool fragmented,
+                                                          bool delta_encoded) {
+  std::vector<SampleStreamResponse> responses(fragmented ? 2 : 1);
+  auto* first = responses.front().add_entries();
+  first->mutable_info()->mutable_item()->set_key(key);
+  first->mutable_info()->mutable_item()->set_table(std::to_string(key));
+  first->mutable_info()->mutable_item()->set_priority(key + 0.5);
+  first->mutable_info()->set_probability(0.25);
+  first->mutable_info()->set_table_size(100);
+  auto* trajectory =
+      first->mutable_info()->mutable_item()->mutable_flat_trajectory();
+  for (int column = 0; column < 3; ++column) {
+    auto* output = trajectory->add_columns();
+    for (int row = 0; row < 2; ++row) {
+      auto* slice = output->add_chunk_slices();
+      slice->set_chunk_key(key * 2 + (column == 2 ? 1 - row : row));
+      slice->set_index(column == 1 ? 1 : 0);
+      slice->set_length(2);
+    }
+  }
+  for (int index = 0; index < 2; ++index) {
+    auto* entry = fragmented && index == 1 ? responses[1].add_entries() : first;
+    entry->set_end_of_sequence(index == 1);
+    auto* chunk = entry->add_data();
+    chunk->set_chunk_key(key * 2 + index);
+    chunk->set_delta_encoded(delta_encoded);
+    chunk->mutable_sequence_range()->set_start(index * 2);
+    chunk->mutable_sequence_range()->set_end(index * 2 + 1);
+    auto numbers = MakeTensor(2);
+    for (int i = 0; i < numbers.NumElements(); ++i) {
+      numbers.flat<uint64_t>()(i) += key * 100 + index * 4;
+    }
+    CHECK_OK(CompressTensorAsProto(
+        delta_encoded ? DeltaEncode(numbers, true) : numbers,
+        chunk->mutable_data()->add_tensors()));
+    tensorflow::Tensor strings(tensorflow::DT_STRING, {2});
+    for (int i = 0; i < 2; ++i) {
+      strings.flat<tensorflow::tstring>()(i) =
+          std::to_string(key * 100 + index * 2 + i) + std::string(256, 'x');
+    }
+    CHECK_OK(
+        CompressTensorAsProto(strings, chunk->mutable_data()->add_tensors()));
+  }
+  return responses;
 }
 
 std::shared_ptr<Table> MakeTable(int max_size = 100) {
@@ -391,20 +439,63 @@ TEST(SampleTest, FailedTrajectoryReadsPreserveColumnsAndOutput) {
   ExpectTensorEqual<uint64_t>(step[0], MakeTensor(2).SubSlice(0));
 }
 
-TEST(GrpcSamplerTest, TrajectoryAcrossResponseBoundaries) {
-  auto first = MakeResponse(4);
-  first.mutable_entries(0)->set_end_of_sequence(false);
-  first.mutable_entries(0)->mutable_info()->mutable_item()->set_key(123);
-  SampleStreamResponse last;
-  last.add_entries()->set_end_of_sequence(true);
-  auto stub = MakeGoodStub({first, last, MakeResponse(4)});
-  Sampler sampler(stub, "table", {2, 2, 1});
-  std::vector<tensorflow::Tensor> batch;
-  REVERB_ASSERT_OK(sampler.GetNextTrajectoryBatch(2, &batch));
-  ASSERT_THAT(batch, SizeIs(6));
-  EXPECT_EQ(batch[0].flat<uint64_t>()(0), 123);
-  ExpectTensorEqual<uint64_t>(tensorflow::tensor::DeepCopy(batch[5].SubSlice(0)), MakeTensor(4));
-  ExpectTensorEqual<uint64_t>(tensorflow::tensor::DeepCopy(batch[5].SubSlice(1)), MakeTensor(4));
+TEST(GrpcSamplerTest,
+     RetainsCompleteAndFragmentedPayloadsAfterStreamDestruction) {
+  for (bool delta_encoded : {false, true}) {
+    auto responses = MakeMultiChunkResponses(11, false, delta_encoded);
+    auto fragmented = MakeMultiChunkResponses(12, true, delta_encoded);
+    responses.push_back(std::move(fragmented[0]));
+    responses.push_back(std::move(fragmented[1]));
+    auto complete = MakeMultiChunkResponses(13, false, delta_encoded);
+    *responses.back().add_entries() = complete.front().entries(0);
+    complete = MakeMultiChunkResponses(14, false, delta_encoded);
+    responses.push_back(std::move(complete.front()));
+
+    std::vector<std::vector<tensorflow::Tensor>> retained(4);
+    std::vector<std::shared_ptr<const SampleInfo>> metadata(4);
+    {
+      Sampler sampler(MakeGoodStub(std::move(responses)), "table", {4, 4, 1});
+      for (int i = 0; i < 4; ++i) {
+        REVERB_ASSERT_OK(sampler.GetNextTrajectory(&retained[i], &metadata[i]));
+      }
+    }
+    for (int i = 0; i < 4; ++i) {
+      ASSERT_THAT(retained[i], SizeIs(3));
+      const uint64_t key = 11 + i;
+      ASSERT_NE(metadata[i], nullptr);
+      EXPECT_EQ(metadata[i]->item().key(), key);
+      EXPECT_EQ(metadata[i]->item().table(), std::to_string(key));
+      EXPECT_EQ(metadata[i]->item().priority(), key + 0.5);
+      EXPECT_EQ(metadata[i]->probability(), 0.25);
+      EXPECT_EQ(metadata[i]->table_size(), 100);
+      EXPECT_EQ(retained[i][0].shape(), tensorflow::TensorShape({4, 2}));
+      EXPECT_EQ(retained[i][1].shape(), tensorflow::TensorShape({4}));
+      EXPECT_EQ(retained[i][2].shape(), tensorflow::TensorShape({4, 2}));
+      for (int j = 0; j < 8; ++j) {
+        EXPECT_EQ(retained[i][0].flat<uint64_t>()(j), key * 100 + j);
+        EXPECT_EQ(retained[i][2].flat<uint64_t>()(j), key * 100 + (j + 4) % 8);
+      }
+      for (int j = 0; j < 4; ++j) {
+        EXPECT_EQ(retained[i][1].flat<tensorflow::tstring>()(j),
+                  std::to_string(key * 100 + j) + std::string(256, 'x'));
+      }
+    }
+  }
+}
+
+TEST(GrpcSamplerTest, DiscardsIncompleteSampleWhenStreamRestarts) {
+  auto stub = std::make_shared<FakeStub>();
+  auto interrupted = MakeMultiChunkResponses(11, true, false);
+  stub->AddStream({interrupted.front()});
+  stub->AddStream(MakeMultiChunkResponses(12, true, false));
+  Sampler sampler(stub, "table", {1, 1, 1});
+  std::vector<tensorflow::Tensor> data;
+  std::shared_ptr<const SampleInfo> info;
+  REVERB_ASSERT_OK(sampler.GetNextTrajectory(&data, &info));
+  ASSERT_THAT(data, SizeIs(3));
+  ASSERT_NE(info, nullptr);
+  EXPECT_EQ(info->item().key(), 12);
+  EXPECT_EQ(data[0].flat<uint64_t>()(0), 1200);
 }
 
 TEST(GrpcSamplerTest, SendsFirstRequest) {

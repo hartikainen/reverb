@@ -19,6 +19,7 @@
 #include <deque>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "absl/memory/memory.h"
@@ -42,9 +43,9 @@
 #include "reverb/cc/support/grpc_util.h"
 #include "reverb/cc/support/trajectory_util.h"
 #include "reverb/cc/table.h"
+#include "reverb/cc/tensor_compression.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_util.h"
-#include "reverb/cc/tensor_compression.h"
 
 namespace deepmind {
 namespace reverb {
@@ -70,25 +71,16 @@ tensorflow::Tensor ScalarTensor(T value) {
   return tensor;
 }
 
-absl::Status AsSample(std::vector<SampleStreamResponse::SampleEntry> responses,
+template <typename ChunkPtr>
+absl::Status AsSample(const SampleInfo& info,
+                      internal::flat_hash_map<uint64_t, ChunkPtr> chunks,
                       std::unique_ptr<Sample>* sample) {
-  const auto& info = responses.front().info();
-  internal::flat_hash_map<uint64_t, std::unique_ptr<ChunkData>> chunks;
-  for (auto& response : responses) {
-    while (response.data_size() != 0) {
-      auto* chunk = response.mutable_data()->ReleaseLast();
-      chunks[chunk->chunk_key()] = absl::WrapUnique<ChunkData>(chunk);
-    }
-  }
-
-  // Count the number of times each chunk is referenced in the column slices.
-  // This allows us to check if the chunk is needed anymore after every use. If
-  // all the references have been handled then the memory of the chunk can be
-  // freed thus reducing total memory usage.
-  internal::flat_hash_map<uint64_t, int> chunk_ref_count;
-  for (const auto& column : info.item().flat_trajectory().columns()) {
-    for (const auto& slice : column.chunk_slices()) {
-      chunk_ref_count[slice.chunk_key()]++;
+  internal::flat_hash_map<uint64_t, int> references;
+  if constexpr (!std::is_pointer_v<ChunkPtr>) {
+    for (const auto& column : info.item().flat_trajectory().columns()) {
+      for (const auto& slice : column.chunk_slices()) {
+        ++references[slice.chunk_key()];
+      }
     }
   }
 
@@ -112,20 +104,39 @@ absl::Status AsSample(std::vector<SampleStreamResponse::SampleEntry> responses,
       column_chunks[i].emplace_back();
       REVERB_RETURN_IF_ERROR(internal::UnpackChunkColumnAndSlice(
           *it->second, slice, &column_chunks[i].back()));
-
-      // If this was the last time the chunk is referenced the we can release
-      // its memory.
-      if (--chunk_ref_count[slice.chunk_key()] == 0) {
-        chunks.erase(it);
+      if constexpr (!std::is_pointer_v<ChunkPtr>) {
+        // Fragmented samples release owned chunks after their last slice.
+        if (--references[slice.chunk_key()] == 0) chunks.erase(it);
       }
     }
   }
 
-  *sample = std::make_unique<Sample>(
-      std::make_shared<SampleInfo>(std::move(info)), std::move(column_chunks),
-      std::move(squeeze_columns));
+  *sample = std::make_unique<Sample>(std::make_shared<SampleInfo>(info),
+                                     std::move(column_chunks),
+                                     std::move(squeeze_columns));
 
   return absl::OkStatus();
+}
+
+absl::Status AsSample(const SampleStreamResponse::SampleEntry& response,
+                      std::unique_ptr<Sample>* sample) {
+  internal::flat_hash_map<uint64_t, const ChunkData*> chunks;
+  for (const auto& chunk : response.data()) {
+    chunks[chunk.chunk_key()] = &chunk;
+  }
+  return AsSample(response.info(), std::move(chunks), sample);
+}
+
+absl::Status AsSample(std::vector<SampleStreamResponse::SampleEntry> responses,
+                      std::unique_ptr<Sample>* sample) {
+  internal::flat_hash_map<uint64_t, std::unique_ptr<ChunkData>> chunks;
+  for (auto& response : responses) {
+    while (!response.data().empty()) {
+      auto* chunk = response.mutable_data()->ReleaseLast();
+      chunks[chunk->chunk_key()] = absl::WrapUnique(chunk);
+    }
+  }
+  return AsSample(responses.front().info(), std::move(chunks), sample);
 }
 
 absl::Status AsSample(const Table::SampledItem& sampled_item,
@@ -249,18 +260,19 @@ class GrpcSamplerWorker : public SamplerWorker {
             return {num_samples_returned, status};
           }
         }
-        for (auto& entry : response.entries()) {
-          parts_of_next_sample.push_back(std::move(entry));
-          // Continue grabbing entries until the current sample is complete.
-          if (!parts_of_next_sample.back().end_of_sequence()) {
-            continue;
-          }
-
-          // We have received everything we need to unpack the next sample so
-          // let's push it to the queue. We don't expect AsSample to ever fail
-          // but it will be closed if the Sampler has been closed.
+        for (auto& entry : *response.mutable_entries()) {
           std::unique_ptr<Sample> sample;
-          auto status = AsSample(std::move(parts_of_next_sample), &sample);
+          absl::Status status;
+          if (parts_of_next_sample.empty() && entry.end_of_sequence()) {
+            // Borrow complete entries so protobuf retains reusable parse
+            // buffers.
+            status = AsSample(entry, &sample);
+          } else {
+            // Fragmented entries transfer ownership so payloads need no copy.
+            parts_of_next_sample.push_back(std::move(entry));
+            if (!parts_of_next_sample.back().end_of_sequence()) continue;
+            status = AsSample(std::move(parts_of_next_sample), &sample);
+          }
           parts_of_next_sample.clear();
           if (!status.ok()) {
             return {num_samples_returned, status};
