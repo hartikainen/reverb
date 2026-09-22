@@ -96,7 +96,8 @@ def main(argv=None):
   parser.add_argument("--platforms", nargs="+", choices=PLATFORMS,
                       default=defaults())
   parser.add_argument("--revision", default="HEAD")
-  parser.add_argument("--python", choices=["3.11", "3.12", "3.13"], default="3.13")
+  parser.add_argument("--python", nargs="+", choices=["3.11", "3.12", "3.13"],
+                      default=["3.13"], help="Python versions to build")
   parser.add_argument("--output-dir", type=Path, default=Path("dist"))
   parser.add_argument("--docker-context", help="Docker context for Linux builds")
   parser.add_argument("--jobs", type=int, default=4)
@@ -105,6 +106,8 @@ def main(argv=None):
     parser.error("`--jobs` must be positive")
   if len(set(args.platforms)) != len(args.platforms):
     parser.error("`--platforms` must not contain duplicates")
+  if len(set(args.python)) != len(args.python):
+    parser.error("`--python` must not contain duplicates")
   if "macos_arm64" in args.platforms and (
       platform.system(), platform.machine()) != ("Darwin", "arm64"):
     parser.error("`macos_arm64` requires an Apple Silicon Mac")
@@ -121,8 +124,10 @@ def main(argv=None):
                       cwd=repo, capture=True)
   output = args.output_dir.resolve() / revision
   for target in args.platforms:
-    if (output / target).exists():
-      parser.error("Output already exists: " + str(output / target))
+    for python_version in args.python:
+      destination = output / target / python_version
+      if destination.exists():
+        parser.error("Output already exists: " + str(destination))
 
   docker = ["docker"]
   if args.docker_context:
@@ -148,25 +153,28 @@ def main(argv=None):
     shutil.copyfile(repo / "docker/wheel.dockerfile", context / "Dockerfile")
     shutil.copyfile(package / "build_wheel_platform.sh", context / "build.sh")
     for target in args.platforms:
-      with tempfile.TemporaryDirectory(prefix=".building-", dir=output) as staging:
-        staging = Path(staging)
-        if PLATFORMS[target]:
-          docker_build(docker, context, archive, staging, target, args.python,
-                       revision, args.jobs, bazel_version)
-        else:
-          native = temporary / "native"
-          native.mkdir()
-          run(["bash", str(package / "build_wheel_platform.sh"), str(archive),
-               str(staging), args.python, revision, str(args.jobs)], cwd=native)
-        wheel, version = check_wheel(staging, target, args.python, revision)
-        manifest = {
-            "revision": revision, "platform": target, "python": args.python,
-            "version": version, "wheel": wheel.name,
-            "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
-        }
-        (staging / "build.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        staging.rename(output / target)
-        print("Tested wheel: " + str(output / target / wheel.name), flush=True)
+      (output / target).mkdir(exist_ok=True)
+      for python_version in args.python:
+        destination = output / target / python_version
+        with tempfile.TemporaryDirectory(prefix=".building-", dir=output) as staging:
+          staging = Path(staging)
+          if PLATFORMS[target]:
+            docker_build(docker, context, archive, staging, target, python_version,
+                         revision, args.jobs, bazel_version)
+          else:
+            native = temporary / ("native-" + python_version)
+            native.mkdir()
+            run(["bash", str(package / "build_wheel_platform.sh"), str(archive),
+                 str(staging), python_version, revision, str(args.jobs)], cwd=native)
+          wheel, version = check_wheel(staging, target, python_version, revision)
+          manifest = {
+              "revision": revision, "platform": target, "python": python_version,
+              "version": version, "wheel": wheel.name,
+              "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+          }
+          (staging / "build.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          staging.rename(destination)
+          print("Tested wheel: " + str(destination / wheel.name), flush=True)
 
 
 if __name__ == "__main__":

@@ -23,12 +23,22 @@ in Docker. On Linux, the default includes the Linux targets. Docker must support
 executing each requested architecture. Docker Desktop supplies emulation on
 Apple Silicon; emulated C++ compilation can be slower than using a native host.
 
+`--python` selects one or more of the registered Python `3.11`, `3.12`, and `3.13`
+toolchains, with `3.13` as the default. Each selected platform builds and tests
+each selected interpreter:
+
+```sh
+python3 reverb/pip_package/build_wheels.py --python 3.11 3.12 3.13
+```
+
 Each build uses a Git archive of `HEAD`, excluding uncommitted changes. Select
 another committed revision with `--revision`. That revision must include
 `WHEEL_LOCAL_VERSION` support. Wheels carry `+g<commit>` in their package version
-and are written to `dist/<commit>/<platform>/`, alongside `build.json` with the
-source revision and wheel hash. Existing platform output directories are never
-overwritten. Use `--output-dir` to keep a separate run.
+and are written to `dist/<commit>/<platform>/<python>/`, alongside `build.json`
+with the source revision and wheel hash. Existing platform and interpreter output
+directories are never overwritten. Other interpreters can be built in subsequent
+runs for the same revision. Use `--output-dir` to keep a separate run. To publish
+all wheels for a revision, select `dist/<commit>/*/*/*.whl`.
 
 The Linux builder uses Ubuntu `24.04` and repairs wheels for `manylinux_2_39`.
 This matches Ubuntu `24.04` deployments but requires a different builder for
@@ -36,8 +46,8 @@ older glibc runtimes. macOS wheels target `macosx_12_0_arm64`.
 
 Source tests and installed-wheel tests must pass before the launcher retains a
 wheel. Installed-wheel tests run outside the source checkout, using Python
-packages from `third_party/bzlmod/requirements.txt`. `--python` selects a supported
-interpreter, and `--jobs` limits Bazel concurrency. Builds run sequentially.
+packages from `third_party/bzlmod/requirements.txt`. `--jobs` limits Bazel
+concurrency. Builds run sequentially.
 Docker builder images and architecture-specific cache volumes persist for reuse;
 the build containers are removed when each build completes or fails.
 

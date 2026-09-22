@@ -1,5 +1,8 @@
 """Check artifact validation and Docker failure handling without a compiler."""
 
+import contextlib
+import io
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -13,21 +16,24 @@ import build_wheels
 REVISION = "a" * 40
 
 
-class WheelValidationTest(unittest.TestCase):
+def make_wheel(directory, *, version=None, tag="manylinux_2_39_aarch64",
+               python_version="3.13"):
+  version = version or "0.15.0+g" + REVISION
+  python_tag = "cp" + python_version.replace(".", "")
+  path = directory / f"dm_reverb-{version}-{python_tag}-{python_tag}-{tag}.whl"
+  with zipfile.ZipFile(path, "w") as archive:
+    archive.writestr(
+        f"dm_reverb-{version}.dist-info/METADATA",
+        f"Name: dm-reverb\nVersion: {version}\n")
+  return path
 
-  def wheel(self, directory, *, version=None, tag="manylinux_2_39_aarch64"):
-    version = version or "0.15.0+g" + REVISION
-    path = directory / f"dm_reverb-{version}-cp313-cp313-{tag}.whl"
-    with zipfile.ZipFile(path, "w") as archive:
-      archive.writestr(
-          f"dm_reverb-{version}.dist-info/METADATA",
-          f"Name: dm-reverb\nVersion: {version}\n")
-    return path
+
+class WheelValidationTest(unittest.TestCase):
 
   def test_matching_wheel(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
-      wheel = self.wheel(root)
+      wheel = make_wheel(root)
       self.assertEqual(
           build_wheels.check_wheel(root, "linux_arm64", "3.13", REVISION)[0],
           wheel)
@@ -35,21 +41,21 @@ class WheelValidationTest(unittest.TestCase):
   def test_rejects_wrong_architecture(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
-      self.wheel(root, tag="manylinux_2_39_x86_64")
+      make_wheel(root, tag="manylinux_2_39_x86_64")
       with self.assertRaisesRegex(ValueError, "tags"):
         build_wheels.check_wheel(root, "linux_arm64", "3.13", REVISION)
 
   def test_rejects_wrong_python(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
-      self.wheel(root)
+      make_wheel(root)
       with self.assertRaisesRegex(ValueError, "tags"):
         build_wheels.check_wheel(root, "linux_arm64", "3.12", REVISION)
 
   def test_rejects_wrong_source_revision(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
-      self.wheel(root, version="0.15.0+g" + "b" * 40)
+      make_wheel(root, version="0.15.0+g" + "b" * 40)
       with self.assertRaisesRegex(ValueError, "source commit"):
         build_wheels.check_wheel(root, "linux_arm64", "3.13", REVISION)
 
@@ -58,8 +64,8 @@ class WheelValidationTest(unittest.TestCase):
       root = Path(directory)
       with self.assertRaisesRegex(ValueError, "exactly one"):
         build_wheels.check_wheel(root, "linux_arm64", "3.13", REVISION)
-      self.wheel(root)
-      self.wheel(root, tag="manylinux_2_39_x86_64")
+      make_wheel(root)
+      make_wheel(root, tag="manylinux_2_39_x86_64")
       with self.assertRaisesRegex(ValueError, "exactly one"):
         build_wheels.check_wheel(root, "linux_arm64", "3.13", REVISION)
 
@@ -109,6 +115,13 @@ class DockerBuildTest(unittest.TestCase):
 
 class ArgumentsTest(unittest.TestCase):
 
+  def test_duplicate_python_versions_are_rejected_before_building(self):
+    with mock.patch("build_wheels.run") as run:
+      with contextlib.redirect_stderr(io.StringIO()):
+        with self.assertRaises(SystemExit):
+          build_wheels.main(["--python", "3.12", "3.12"])
+      run.assert_not_called()
+
   def test_invalid_jobs_are_rejected_before_building(self):
     with mock.patch("build_wheels.run") as run:
       with self.assertRaises(SystemExit):
@@ -127,6 +140,77 @@ class ArgumentsTest(unittest.TestCase):
       with mock.patch("build_wheels.platform.machine", return_value="arm64"):
         self.assertEqual(build_wheels.defaults(),
                          ["macos_arm64", "linux_arm64", "linux_x86_64"])
+
+
+class PythonVersionsTest(unittest.TestCase):
+
+  def setUp(self):
+    self.contexts = contextlib.ExitStack()
+    self.addCleanup(self.contexts.close)
+    self.directory = self.contexts.enter_context(tempfile.TemporaryDirectory())
+    self.output = Path(self.directory)
+    self.builds = []
+    self.contexts.enter_context(mock.patch(
+        "build_wheels.platform.system", return_value="Darwin"))
+    self.contexts.enter_context(mock.patch(
+        "build_wheels.platform.machine", return_value="arm64"))
+    self.contexts.enter_context(mock.patch(
+        "build_wheels.shutil.which", return_value="tool"))
+    self.contexts.enter_context(mock.patch("build_wheels.shutil.copyfile"))
+    self.contexts.enter_context(mock.patch(
+        "build_wheels.run", side_effect=self.run_command))
+    self.contexts.enter_context(mock.patch(
+        "build_wheels.docker_build", side_effect=self.docker_build))
+    self.contexts.enter_context(contextlib.redirect_stdout(io.StringIO()))
+    self.contexts.enter_context(contextlib.redirect_stderr(io.StringIO()))
+
+  def run_command(self, command, **kwargs):
+    if command[:2] == ["git", "rev-parse"]:
+      return REVISION
+    if command[:2] == ["git", "show"]:
+      if command[2].endswith(":.bazelversion"):
+        return "9.2.0"
+      return "WHEEL_LOCAL_VERSION"
+    if command[0] == "bash":
+      Path(kwargs["cwd"], "work").mkdir()
+      self.write_wheel(Path(command[3]), "macos_arm64", command[4])
+
+  def docker_build(self, docker, context, archive, output, target, python_version,
+                   revision, jobs, bazel_version):
+    self.write_wheel(output, target, python_version)
+
+  def write_wheel(self, output, target, python_version):
+    self.builds.append((target, python_version))
+    tags = {
+        "macos_arm64": "macosx_12_0_arm64",
+        "linux_arm64": "manylinux_2_39_aarch64",
+        "linux_x86_64": "manylinux_2_39_x86_64",
+    }
+    make_wheel(output, tag=tags[target], python_version=python_version)
+
+  def launch(self, *args):
+    build_wheels.main(["--output-dir", str(self.output), *args])
+
+  def test_versions_build_on_every_platform_with_separate_manifests(self):
+    self.launch("--python", "3.11", "3.12", "3.13")
+    expected = {(target, version) for target in build_wheels.PLATFORMS
+                for version in ("3.11", "3.12", "3.13")}
+    self.assertCountEqual(self.builds, expected)
+    for target, version in expected:
+      directory = self.output / REVISION / target / version
+      manifest = json.loads((directory / "build.json").read_text())
+      self.assertEqual(manifest["python"], version)
+      self.assertEqual(manifest["platform"], target)
+      self.assertTrue((directory / manifest["wheel"]).is_file())
+
+  def test_default_and_additional_version_can_share_output(self):
+    self.launch("--platforms", "linux_arm64")
+    self.assertEqual(self.builds, [("linux_arm64", "3.13")])
+    self.launch("--platforms", "linux_arm64", "--python", "3.12")
+    self.assertEqual(self.builds[-1], ("linux_arm64", "3.12"))
+    with self.assertRaises(SystemExit):
+      self.launch("--platforms", "linux_arm64", "--python", "3.11", "3.13")
+    self.assertEqual(len(self.builds), 2)
 
 
 if __name__ == "__main__":
