@@ -124,3 +124,12 @@ py_test(
         "@pypi//numpy",
     ],
 )
+
+py_binary(
+    name = "sampler_benchmark",
+    srcs = ["sampler_benchmark.py"],
+    deps = [
+        "//reverb",
+        "@pypi//numpy",
+    ],
+)
