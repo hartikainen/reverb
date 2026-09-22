@@ -480,6 +480,10 @@ class TrajectoryColumn {
   //
   absl::Status Validate() const;
 
+  // Replaces `locked_refs` with the references checked by validation.
+  absl::Status ValidateAndLockReferences(
+      std::vector<std::shared_ptr<CellRef>>* locked_refs) const;
+
   // Locks and pushes all references to `locked_refs`.
   ABSL_MUST_USE_RESULT bool LockReferences(
       std::vector<std::shared_ptr<CellRef>>* locked_refs) const;

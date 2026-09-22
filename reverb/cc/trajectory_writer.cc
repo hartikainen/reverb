@@ -817,6 +817,13 @@ void TrajectoryColumn::ToProto(FlatTrajectory::Column* proto) const {
 
 absl::Status TrajectoryColumn::Validate() const {
   std::vector<std::shared_ptr<CellRef>> locked_refs;
+  return ValidateAndLockReferences(&locked_refs);
+}
+
+absl::Status TrajectoryColumn::ValidateAndLockReferences(
+    std::vector<std::shared_ptr<CellRef>>* output) const {
+  auto& locked_refs = *output;
+  locked_refs.clear();
   if (!LockReferences(&locked_refs)) {
     return absl::InvalidArgumentError("Column contains expired CellRef.");
   }
@@ -852,6 +859,7 @@ absl::Status TrajectoryColumn::Validate() const {
 
 bool TrajectoryColumn::LockReferences(
     std::vector<std::shared_ptr<CellRef>>* locked_refs) const {
+  locked_refs->reserve(locked_refs->size() + refs_.size());
   for (const std::weak_ptr<CellRef>& ref : refs_) {
     locked_refs->push_back(ref.lock());
     if (!locked_refs->back()) return false;

@@ -124,14 +124,11 @@ absl::Status QueueWriter::CreateItem(
   for (int col_idx = 0; col_idx < trajectory.size(); ++col_idx) {
     auto& column = trajectory[col_idx];
 
-    if (absl::Status status = column.Validate(); !status.ok()) {
+    std::vector<std::shared_ptr<CellRef>> refs;
+    if (absl::Status status = column.ValidateAndLockReferences(&refs);
+        !status.ok()) {
       return absl::InvalidArgumentError(
           absl::StrCat("Error in column ", col_idx, ": ", status.message()));
-    }
-
-    std::vector<std::shared_ptr<CellRef>> refs;
-    if (!column.LockReferences(&refs)) {
-      return absl::InternalError("CellRef unexpectedly expired in CreateItem.");
     }
 
     if (column.squeezed()) {
