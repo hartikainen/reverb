@@ -23,6 +23,16 @@ py_test(
     main = "build_wheel_test.py",
 )
 
+py_test(
+    name = "build_wheels_test",
+    srcs = [
+        "build_wheels.py",
+        "build_wheels_test.py",
+    ],
+    imports = ["."],
+    main = "build_wheels_test.py",
+)
+
 reverb_wheel(
     name = "wheel",
     platform = select({

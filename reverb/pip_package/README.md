@@ -9,7 +9,51 @@ require Xcode command-line tools.
 with `3.13` as the default. Wheel targets support Linux `x86_64`, Linux
 `aarch64`, and macOS Apple Silicon. They compile against TensorFlow `2.21.0`.
 
-## Build wheels
+## Build platform wheels
+
+From an Apple Silicon Mac with Python, Docker Desktop, Bazelisk, `uv`, and
+Xcode command-line tools installed:
+
+```sh
+python3 reverb/pip_package/build_wheels.py
+```
+
+The launcher builds `macos_arm64` natively and `linux_arm64` and `linux_x86_64`
+in Docker. On Linux, the default includes the Linux targets. Docker must support
+executing each requested architecture. Docker Desktop supplies emulation on
+Apple Silicon; emulated C++ compilation can be slower than using a native host.
+
+Each build uses a Git archive of `HEAD`, excluding uncommitted changes. Select
+another committed revision with `--revision`. That revision must include
+`WHEEL_LOCAL_VERSION` support. Wheels carry `+g<commit>` in their package version
+and are written to `dist/<commit>/<platform>/`, alongside `build.json` with the
+source revision and wheel hash. Existing platform output directories are never
+overwritten. Use `--output-dir` to keep a separate run.
+
+The Linux builder uses Ubuntu `24.04` and repairs wheels for `manylinux_2_39`.
+This matches Ubuntu `24.04` deployments but requires a different builder for
+older glibc runtimes. macOS wheels target `macosx_12_0_arm64`.
+
+Source tests and installed-wheel tests must pass before the launcher retains a
+wheel. Installed-wheel tests run outside the source checkout, using Python
+packages from `third_party/bzlmod/requirements.txt`. `--python` selects a supported
+interpreter, and `--jobs` limits Bazel concurrency. Builds run sequentially.
+Docker builder images and architecture-specific cache volumes persist for reuse;
+the build containers are removed when each build completes or fails.
+
+To build the Linux wheel on a native remote Docker host:
+
+```sh
+python3 reverb/pip_package/build_wheels.py \
+  --platforms linux_x86_64 --docker-context amd64-builder
+```
+
+`amd64-builder` must be an existing Docker context. Inputs and outputs travel
+through `docker cp`, so a remote host does not need a checkout or host bind mounts.
+Use `--platforms macos_arm64` or `--platforms linux_arm64` for the other builds.
+The launcher builds wheels without publishing them.
+
+## Build wheels on the host
 
 ```sh
 bash oss_build.sh --release --python '3.13'
