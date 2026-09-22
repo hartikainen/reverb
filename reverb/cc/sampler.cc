@@ -575,17 +575,18 @@ absl::Status Sampler::GetNextTrajectory(
 }
 
 absl::Status Sampler::GetNextTrajectoryBatch(
-    int batch_size, std::vector<tensorflow::Tensor>* data) {
-  return GetNextBatch(batch_size, false, data);
+    int batch_size, std::vector<tensorflow::Tensor>* data, bool timeout_as_end) {
+  return GetNextBatch(batch_size, false, timeout_as_end, data);
 }
 
 absl::Status Sampler::GetNextTimestepBatch(
-    int batch_size, std::vector<tensorflow::Tensor>* data) {
-  return GetNextBatch(batch_size, true, data);
+    int batch_size, std::vector<tensorflow::Tensor>* data, bool timeout_as_end) {
+  return GetNextBatch(batch_size, true, timeout_as_end, data);
 }
 
 absl::Status Sampler::GetNextBatch(
-    int batch_size, bool timesteps, std::vector<tensorflow::Tensor>* data) {
+    int batch_size, bool timesteps, bool timeout_as_end,
+    std::vector<tensorflow::Tensor>* data) {
   if (batch_size <= 0) {
     return absl::InvalidArgumentError("`batch_size` must be positive.");
   }
@@ -597,7 +598,8 @@ absl::Status Sampler::GetNextBatch(
                      : GetNextTrajectory(&sample, &info);
   };
   auto status = next();
-  if (timesteps && absl::IsOutOfRange(status)) {
+  if ((timesteps && absl::IsOutOfRange(status)) ||
+      (timeout_as_end && absl::IsDeadlineExceeded(status))) {
     data->clear();
     return absl::OkStatus();
   }
@@ -620,7 +622,8 @@ absl::Status Sampler::GetNextBatch(
   for (int row = 0; row < batch_size; ++row) {
     if (row != 0) {
       status = next();
-      if (timesteps && absl::IsOutOfRange(status)) {
+      if ((timesteps && absl::IsOutOfRange(status)) ||
+          (timeout_as_end && absl::IsDeadlineExceeded(status))) {
         for (auto& column : batch) column = column.Slice(0, row);
         break;
       }

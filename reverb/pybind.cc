@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <atomic>
 #include <cstddef>
 #include <deque>
 #include <cstdint>
@@ -54,6 +55,7 @@
 #include "reverb/cc/trajectory_writer.h"
 #include "reverb/cc/writer.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_util.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 
 namespace {
@@ -115,7 +117,8 @@ class PatternWriter {
   PatternWriter(const std::vector<std::string>& serialized, int history) {
     using namespace deepmind::reverb;
     if (history <= 0 || serialized.empty()) {
-      throw pybind11::value_error("Patterns and positive history are required.");
+      throw pybind11::value_error(
+          "Patterns and positive history are required.");
     }
     std::vector<StructuredWriterConfig> configs;
     for (const auto& value : serialized) {
@@ -140,7 +143,97 @@ class PatternWriter {
     return result;
   }
 
+  absl::Status SetBlock(std::vector<tensorflow::Tensor> data,
+                        tensorflow::Tensor ends) {
+    using namespace deepmind::reverb;
+    if (position_ < length_) {
+      return absl::FailedPreconditionError(
+          "Consume the input block before replacing it.");
+    }
+    if (ends.dtype() != tensorflow::DT_BOOL || ends.dims() != 1) {
+      return absl::InvalidArgumentError(
+          "Episode flags must be a boolean vector.");
+    }
+    for (const auto& column : data) {
+      if (column.dims() < 1 || column.dim_size(0) != ends.dim_size(0)) {
+        return absl::InvalidArgumentError(
+            "Input columns and episode flags must have matching lengths.");
+      }
+    }
+    block_ = std::move(data);
+    ends_ = std::move(ends);
+    position_ = 0;
+    length_ = ends_.dim_size(0);
+    return absl::OkStatus();
+  }
+
+  absl::Status Read(int batch_size, bool clear_buffers, bool flush,
+                    std::vector<tensorflow::Tensor>* output) {
+    using namespace deepmind::reverb;
+    if (batch_size <= 0)
+      return absl::InvalidArgumentError("Batch size must be positive.");
+    while (pending_.size() < batch_size) {
+      if (closed_) return absl::CancelledError("Pattern iterator is closed.");
+      while (queue_.empty() && position_ < length_) {
+        if (closed_) return absl::CancelledError("Pattern iterator is closed.");
+        std::vector<absl::optional<tensorflow::Tensor>> step;
+        step.reserve(block_.size());
+        for (const auto& column : block_) {
+          auto value = column.SubSlice(position_);
+          if (!value.IsAligned()) {
+            value = tensorflow::tensor::DeepCopy(value);
+          }
+          step.push_back(std::move(value));
+        }
+        auto status = writer_->Append(std::move(step));
+        if (!status.ok()) return status;
+        if (ends_.flat<bool>()(position_++)) {
+          status = writer_->EndEpisode(clear_buffers);
+          if (!status.ok()) return status;
+        }
+      }
+      if (queue_.empty()) break;
+      pending_.push_back(std::move(queue_.front()));
+      queue_.pop_front();
+    }
+    if (pending_.empty() || (pending_.size() < batch_size && !flush)) {
+      return absl::OkStatus();
+    }
+    const size_t columns = pending_.front().size();
+    for (size_t column = 0; column < columns; ++column) {
+      std::vector<tensorflow::Tensor> rows;
+      rows.reserve(pending_.size());
+      for (const auto& item : pending_) {
+        if (item.size() != columns) {
+          return absl::InvalidArgumentError(
+              "Pattern output column counts must agree within a batch.");
+        }
+        tensorflow::Tensor row;
+        auto shape = item[column].shape();
+        shape.InsertDim(0, 1);
+        if (!row.CopyFrom(item[column], shape)) {
+          return absl::InternalError("Cannot add the output batch dimension.");
+        }
+        rows.push_back(std::move(row));
+      }
+      tensorflow::Tensor combined;
+      auto status = tensorflow::tensor::Concat(rows, &combined);
+      if (!status.ok()) return status;
+      output->push_back(std::move(combined));
+    }
+    pending_.clear();
+    return absl::OkStatus();
+  }
+
+  void Close() { closed_ = true; }
+
  private:
+  std::atomic<bool> closed_{false};
+  int64_t position_ = 0;
+  int64_t length_ = 0;
+  std::vector<tensorflow::Tensor> block_;
+  tensorflow::Tensor ends_;
+  std::vector<std::vector<tensorflow::Tensor>> pending_;
   std::deque<std::vector<tensorflow::Tensor>> queue_;
   std::unique_ptr<deepmind::reverb::StructuredWriter> writer_;
 };
@@ -356,7 +449,23 @@ PYBIND11_MODULE(libpybind, m) {
 
   py::class_<PatternWriter>(m, "PatternWriter")
       .def(py::init<const std::vector<std::string>&, int>())
-      .def("Append", &PatternWriter::Append);
+      .def("Append", &PatternWriter::Append)
+      .def("SetBlock", [](PatternWriter* writer, std::vector<tensorflow::Tensor> data,
+                           tensorflow::Tensor ends) {
+        MaybeRaiseFromStatus(writer->SetBlock(std::move(data), std::move(ends)));
+      })
+      .def("Read", [](PatternWriter* writer, int batch_size, bool clear_buffers,
+                       bool flush) {
+        std::vector<tensorflow::Tensor> output;
+        absl::Status status;
+        {
+          py::gil_scoped_release release;
+          status = writer->Read(batch_size, clear_buffers, flush, &output);
+        }
+        MaybeRaiseFromStatus(status);
+        return output;
+      })
+      .def("Close", &PatternWriter::Close);
 
   py::class_<Sampler>(m, "Sampler")
       .def("Close", &Sampler::Close, py::call_guard<py::gil_scoped_release>())
@@ -385,12 +494,12 @@ PYBIND11_MODULE(libpybind, m) {
              return Sampler::WithInfoTensors(*info, std::move(data));
            })
       .def("GetNextTrajectoryBatch",
-           [](Sampler* sampler, int batch_size) {
+           [](Sampler* sampler, int batch_size, bool timeout_as_end) {
              absl::Status status;
              std::vector<tensorflow::Tensor> data;
              {
                py::gil_scoped_release release;
-               status = sampler->GetNextTrajectoryBatch(batch_size, &data);
+               status = sampler->GetNextTrajectoryBatch(batch_size, &data, timeout_as_end);
              }
              if (absl::IsDeadlineExceeded(status)) {
                PyErr_SetString(py::module_::import("reverb.errors")
@@ -400,14 +509,14 @@ PYBIND11_MODULE(libpybind, m) {
              }
              MaybeRaiseFromStatus(status);
              return data;
-           }, py::arg("batch_size"))
+           }, py::arg("batch_size"), py::arg("timeout_as_end") = false)
       .def("GetNextTimestepBatch",
-           [](Sampler* sampler, int batch_size) {
+           [](Sampler* sampler, int batch_size, bool timeout_as_end) {
              absl::Status status;
              std::vector<tensorflow::Tensor> data;
              {
                py::gil_scoped_release release;
-               status = sampler->GetNextTimestepBatch(batch_size, &data);
+               status = sampler->GetNextTimestepBatch(batch_size, &data, timeout_as_end);
              }
              if (absl::IsDeadlineExceeded(status)) {
                PyErr_SetString(py::module_::import("reverb.errors")
@@ -417,7 +526,7 @@ PYBIND11_MODULE(libpybind, m) {
              }
              MaybeRaiseFromStatus(status);
              return data;
-           }, py::arg("batch_size"))
+           }, py::arg("batch_size"), py::arg("timeout_as_end") = false)
       .def_property_readonly_static("NUM_INFO_TENSORS", [](py::object) {
         return Sampler::kNumInfoTensors;
       });
@@ -448,7 +557,7 @@ PYBIND11_MODULE(libpybind, m) {
       .def("NewSampler",
            [](Client* client, const std::string& table, int64_t max_samples,
               size_t buffer_size, int num_workers,
-              int64_t rate_limiter_timeout_ms) {
+              int64_t rate_limiter_timeout_ms, int max_samples_per_stream) {
              if (rate_limiter_timeout_ms < -1) {
                MaybeRaiseFromStatus(absl::InvalidArgumentError(
                    "`rate_limiter_timeout_ms` must be `-1` or nonnegative"));
@@ -458,6 +567,7 @@ PYBIND11_MODULE(libpybind, m) {
              options.max_samples = max_samples;
              options.max_in_flight_samples_per_worker = buffer_size;
              options.num_workers = num_workers;
+             options.max_samples_per_stream = max_samples_per_stream;
              options.rate_limiter_timeout =
                  Int64MillisToNonnegativeDuration(rate_limiter_timeout_ms);
              // Release the GIL only when waiting for the call to complete. If
@@ -474,7 +584,8 @@ PYBIND11_MODULE(libpybind, m) {
              return sampler;
            }, py::arg("table"), py::arg("max_samples"), py::arg("buffer_size"),
            py::arg("num_workers") = -1,
-           py::arg("rate_limiter_timeout_ms") = -1)
+           py::arg("rate_limiter_timeout_ms") = -1,
+           py::arg("max_samples_per_stream") = -1)
       .def("NewTrajectoryWriter",
            [](Client* client, std::shared_ptr<ChunkerOptions> chunker_options,
               bool validate_items) {

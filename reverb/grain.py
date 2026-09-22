@@ -20,6 +20,8 @@ background reads, and close the outer iterator when consumption stops.
 """
 
 import collections
+import copy
+import dataclasses
 import threading
 
 import grain
@@ -50,19 +52,45 @@ class _Iterator(grain.DatasetIterator):
 class TrajectoryDataset(grain.IterDataset):
   """Batched trajectories with host `SampleInfo` and native sampling workers.
 
-  Arguments match `reverb.ReplayDataset`. `max_samples` counts replay items.
+  Arguments match `reverb.ReplayDataset`. `max_samples` counts replay items,
+  with `None` or `-1` denoting an unbounded stream. Without `batch_size`, each
+  element is a trajectory with scalar metadata. `.batch` uses native batching.
+  Optional `dtypes` and `shapes` describe and validate the output data structure.
+  Rate-limiter timeouts end the sequence, including a final partial batch unless
+  `drop_remainder` is set. Set `timeout_as_end_of_sequence=False` to raise instead.
   Each iterator owns a sampler, so workers must construct their own iterators.
   Grain `map`, `filter`, and `batch` compose with this source. Checkpointing and
   checkpoint-dependent prefetch transforms are unsupported. Use `prefetch`.
   """
 
-  def __init__(self, server_address, table, batch_size=1, **kwargs):
+  def __init__(self, server_address, table, batch_size=None, *,
+               timeout_as_end_of_sequence=True, dtypes=None, shapes=None, **kwargs):
     super().__init__()
+    self._spec = None
+    if (dtypes is None) != (shapes is None):
+      raise ValueError("Provide both `dtypes` and `shapes`")
+    if dtypes is not None:
+      self._spec = tree.map_structure_up_to(
+          dtypes, lambda dtype, shape: tf.TensorSpec(shape, dtype),
+          dtypes, shapes)
+    self._unbatched = batch_size is None
+    self._timeout_as_end = timeout_as_end_of_sequence
+    if kwargs.get("max_samples") == -1:
+      kwargs["max_samples"] = None
     self._config = replay_dataset.ReplayDataset(
-        server_address, table, batch_size, **kwargs)
+        server_address, table, 1 if batch_size is None else batch_size, **kwargs)
+
+  def batch(self, batch_size, *, drop_remainder=False, batch_fn=None):
+    if not self._unbatched or batch_fn is not None:
+      return super().batch(batch_size, drop_remainder=drop_remainder, batch_fn=batch_fn)
+    result = copy.copy(self)
+    result._unbatched = False
+    result._config = dataclasses.replace(
+        self._config, batch_size=batch_size, drop_remainder=drop_remainder)
+    return result
 
   def __iter__(self):
-    return _SampleIterator(self._config, timesteps=False)
+    return _SampleIterator(self, timesteps=False)
 
 
 class TimestepDataset(TrajectoryDataset):
@@ -74,21 +102,44 @@ class TimestepDataset(TrajectoryDataset):
   """
 
   def __iter__(self):
-    return _SampleIterator(self._config, timesteps=True)
+    return _SampleIterator(self, timesteps=True)
 
 
 class _SampleIterator(_Iterator):
 
-  def __init__(self, config, timesteps):
+  def __init__(self, dataset, timesteps):
     super().__init__()
     self._source = None
-    self._source = replay_dataset._ReplayIterator(config, timesteps=timesteps)
+    self._unbatched = dataset._unbatched
+    self._spec = dataset._spec
+    self._source = replay_dataset._ReplayIterator(
+        dataset._config, timesteps=timesteps, timeout_as_end=dataset._timeout_as_end)
 
   def __next__(self):
     if self._closed:
       raise StopIteration
     try:
-      return next(self._source)
+      sample = next(self._source)
+      if self._spec is not None:
+        leaves = tree.flatten(sample.data)
+        specs = tree.flatten(self._spec)
+        if len(leaves) != len(specs):
+          raise ValueError("Sample columns do not match `dtypes` and `shapes`")
+        for value, spec in zip(leaves, specs):
+          dtype = np.dtype(spec.dtype.as_numpy_dtype)
+          if dtype.kind in "SU":
+            dtype = np.dtype(object)
+          shape_matches = (spec.shape.rank is None or
+                           (spec.shape.rank == value.ndim - 1 and all(
+                               expected is None or expected == actual
+                               for expected, actual in zip(spec.shape, value.shape[1:]))))
+          if value.dtype != dtype or not shape_matches:
+            raise ValueError("Sample dtype or shape does not match the dataset specification")
+        sample = replay_sample.ReplaySample(
+            sample.info, tree.unflatten_as(self._spec, leaves))
+      if self._unbatched:
+        sample = tree.map_structure(lambda value: value[0], sample)
+      return sample
     except BaseException:
       self.close()
       raise
@@ -108,11 +159,20 @@ class PatternDataset(grain.IterDataset):
   history when `respect_episode_boundaries` is true. Input exhaustion does not
   imply an episode end. Configurations must produce compatible structures,
   shapes, and dtypes, as required by `structured_writer.infer_signature`.
+
+  Set `input_batches=True` for a stream of blocks with a leading step dimension.
+  The episode-end predicate then returns a boolean vector. Native processing
+  consumes at most `input_block_size` steps per input conversion, and `.batch`
+  assembles outputs in C++. Block boundaries do not imply episode boundaries.
   """
 
   def __init__(self, input_dataset, configs, respect_episode_boundaries,
-               is_end_of_episode):
+               is_end_of_episode, *, input_batches=False, input_block_size=256):
     super().__init__(input_dataset)
+    self._input_batches = input_batches
+    self._block_size = replay_dataset._positive_integer(input_block_size, "input_block_size")
+    self._output_batch_size = None
+    self._drop_remainder = False
     configs = list(configs)
     if not configs:
       raise ValueError("`configs` must not be empty")
@@ -121,8 +181,8 @@ class PatternDataset(grain.IterDataset):
     for original in configs:
       config = structured_writer.Config()
       config.CopyFrom(original)
-      history = max((abs(min(node.start, node.stop)) for node in config.flat),
-                    default=1)
+      history = max(self._history, max(
+          (abs(min(node.start, node.stop)) for node in config.flat), default=1))
       config.conditions.add(buffer_length=True, ge=history)
       self._history = max(self._history, history)
       self._configs.append(config.SerializeToString())
@@ -133,8 +193,110 @@ class PatternDataset(grain.IterDataset):
     self._is_end = is_end_of_episode
     pybind.PatternWriter(self._configs, self._history)
 
+  @classmethod
+  def from_tensor_slices(cls, data, configs, respect_episode_boundaries,
+                         is_end_of_episode, *, repeat=False, input_block_size=256):
+    """Process array slices natively, with a vectorized episode-end predicate.
+
+    Leaves share a leading step dimension. `repeat` repeats the input arrays,
+    while episode boundaries remain controlled by `is_end_of_episode`.
+    """
+    source = grain.MapDataset.source([data])
+    if repeat:
+      source = source.repeat()
+    source = source.to_iter_dataset(
+        grain.ReadOptions(num_threads=0, prefetch_buffer_size=0))
+    return cls(source, configs, respect_episode_boundaries, is_end_of_episode,
+               input_batches=True, input_block_size=input_block_size)
+
+  def batch(self, batch_size, *, drop_remainder=False, batch_fn=None):
+    if not self._input_batches or self._output_batch_size is not None or batch_fn is not None:
+      return super().batch(batch_size, drop_remainder=drop_remainder, batch_fn=batch_fn)
+    result = copy.copy(self)
+    result._output_batch_size = replay_dataset._positive_integer(batch_size, "batch_size")
+    result._drop_remainder = drop_remainder
+    return result
+
   def __iter__(self):
+    if self._input_batches:
+      return _BlockPatternIterator(iter(self._parents[0]), self)
     return _PatternIterator(iter(self._parents[0]), self)
+
+
+class _BlockPatternIterator(_Iterator):
+
+  def __init__(self, parent, dataset):
+    super().__init__(parent)
+    self._dataset = dataset
+    self._writer = pybind.PatternWriter(dataset._configs, dataset._history)
+    self._structure = None
+    self._initialized = False
+    self._block = None
+    self._position = 0
+    self._length = 0
+    self._eof = False
+
+  def _set_input(self):
+    while self._position == self._length:
+      block = next(self._parent)
+      if self._closed:
+        raise StopIteration
+      if not self._initialized:
+        self._structure = tree.map_structure(lambda _: None, block)
+        self._initialized = True
+        configs = [structured_writer.Config.FromString(c)
+                   for c in self._dataset._configs]
+        structured_writer.infer_signature(configs, tree.map_structure(
+            lambda v: tf.TensorSpec(np.shape(v)[1:], np.asarray(v).dtype),
+            block))
+      tree.assert_same_structure(self._structure, block)
+      columns = tree.flatten(block)
+      if not columns or any(np.ndim(v) < 1 for v in columns):
+        raise ValueError("Input blocks require a leading step dimension")
+      self._length = len(columns[0])
+      if any(len(v) != self._length for v in columns):
+        raise ValueError("Input block columns must have matching lengths")
+      self._block = block
+      self._position = 0
+    end = min(self._position + self._dataset._block_size, self._length)
+    block = tree.map_structure(lambda v: v[self._position:end], self._block)
+    flags = np.asarray(self._dataset._is_end(block))
+    if flags.dtype != np.dtype(bool) or flags.shape != (end - self._position,):
+      raise ValueError("`is_end_of_episode` must return a boolean vector for an input block")
+    self._writer.SetBlock(tree.flatten(block), flags)
+    self._position = end
+
+  def __next__(self):
+    size = self._dataset._output_batch_size or 1
+    try:
+      while not self._closed:
+        values = self._writer.Read(size, self._dataset._respect, self._eof)
+        if self._closed:
+          raise StopIteration
+        if values:
+          if len(values[0]) < size and self._dataset._drop_remainder:
+            raise StopIteration
+          if self._dataset._output_batch_size is None:
+            values = [value[0] for value in values]
+          return tree.unflatten_as(self._dataset._structure, values)
+        if self._eof:
+          raise StopIteration
+        try:
+          self._set_input()
+        except StopIteration:
+          self._eof = True
+      raise StopIteration
+    except BaseException as error:
+      cancelled = self._closed
+      self.close()
+      if cancelled and isinstance(error, RuntimeError):
+        raise StopIteration from None
+      raise
+
+  def close(self):
+    self._writer.Close()
+    super().close()
+    self._block = None
 
 
 class _PatternIterator(_Iterator):
@@ -145,6 +307,7 @@ class _PatternIterator(_Iterator):
     self._writer = pybind.PatternWriter(dataset._configs, dataset._history)
     self._pending = collections.deque()
     self._structure = None
+    self._initialized = False
 
   def __next__(self):
     if self._closed:
@@ -152,8 +315,9 @@ class _PatternIterator(_Iterator):
     try:
       while not self._pending:
         step = next(self._parent)
-        if self._structure is None:
+        if not self._initialized:
           self._structure = tree.map_structure(lambda _: None, step)
+          self._initialized = True
           configs = [structured_writer.Config.FromString(c)
                      for c in self._dataset._configs]
           structured_writer.infer_signature(configs, tree.map_structure(

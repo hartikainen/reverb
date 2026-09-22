@@ -1,0 +1,30 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+py_binary(
+    name = "dataset_semantics",
+    srcs = ["dataset_semantics.py"],
+    deps = [
+        "//reverb",
+        "//reverb:grain",
+        "@pypi//dm_tree",
+        "@pypi//numpy",
+    ],
+)
+
+py_test(
+    name = "dataset_semantics_test",
+    srcs = [
+        "dataset_semantics.py",
+        "dataset_semantics_test.py",
+    ],
+    data = ["testdata/tensorflow_dataset_semantics.json"],
+    imports = ["."],
+    deps = [
+        "//reverb",
+        "//reverb:grain",
+        "@pypi//dm_tree",
+        "@pypi//numpy",
+    ],
+)

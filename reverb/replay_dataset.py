@@ -50,6 +50,7 @@ class ReplayDataset:
     num_workers: Native sampler worker count.
     rate_limiter_timeout_ms: Server sampling timeout, or `-1` to wait.
     signature_timeout_secs: Timeout for fetching the table signature.
+    max_samples_per_stream: Samples per RPC stream, or `-1` for automatic selection.
   """
 
   server_address: str
@@ -61,10 +62,14 @@ class ReplayDataset:
   num_workers: int = 1
   rate_limiter_timeout_ms: int = -1
   signature_timeout_secs: int = 30
+  max_samples_per_stream: int = -1
 
   def __post_init__(self):
-    for name in ("batch_size", "prefetch_size", "num_workers", "signature_timeout_secs"):
+    for name in ("batch_size", "prefetch_size", "signature_timeout_secs"):
       _positive_integer(getattr(self, name), name)
+    for name in ("num_workers", "max_samples_per_stream"):
+      if operator.index(getattr(self, name)) != -1:
+        _positive_integer(getattr(self, name), name)
     if self.max_samples is not None and operator.index(self.max_samples) < 0:
       raise ValueError("`max_samples` must be nonnegative or `None`")
     if operator.index(self.rate_limiter_timeout_ms) < -1:
@@ -77,9 +82,10 @@ class ReplayDataset:
 
 class _ReplayIterator:
 
-  def __init__(self, dataset, *, timesteps=False):
+  def __init__(self, dataset, *, timesteps=False, timeout_as_end=False):
     self._dataset = dataset
     self._timesteps = timesteps
+    self._timeout_as_end = timeout_as_end
     self._closed = False
     self._count = 0
     self._sampler = None
@@ -95,6 +101,7 @@ class _ReplayIterator:
         dataset.prefetch_size,
         dataset.num_workers,
         dataset.rate_limiter_timeout_ms,
+        dataset.max_samples_per_stream,
     )
 
   def __iter__(self):
@@ -107,17 +114,21 @@ class _ReplayIterator:
       count = self._dataset.batch_size
       if self._timesteps:
         values = ([] if self._sampler is None else
-                  self._sampler.GetNextTimestepBatch(count))
+                  self._sampler.GetNextTimestepBatch(count, self._timeout_as_end))
         count = len(values[0]) if values else 0
       else:
         if self._dataset.max_samples is not None:
           count = min(count, self._dataset.max_samples - self._count)
-        values = self._sampler.GetNextTrajectoryBatch(count) if count else []
+        values = (self._sampler.GetNextTrajectoryBatch(count, self._timeout_as_end)
+                  if count else [])
+        count = len(values[0]) if values else 0
       self._count += count
       if count == 0 or (count != self._dataset.batch_size and
                         self._dataset.drop_remainder):
         self.close()
         raise StopIteration
+      if count < self._dataset.batch_size:
+        self.close()
       info = replay_sample.SampleInfo(*values[:5])
       data = values[5:]
       if self._signature is not None:

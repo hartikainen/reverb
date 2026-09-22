@@ -295,13 +295,17 @@ class Sampler {
   // Returns exactly `batch_size` trajectories with batched metadata prepended.
   // Shapes and dtypes must agree across samples. On error, consumed samples
   // are not restored and `data` is unchanged. Concurrent reads are unsupported.
+  // With `timeout_as_end`, a timeout returns the accumulated prefix or no data.
   absl::Status GetNextTrajectoryBatch(
-      int batch_size, std::vector<tensorflow::Tensor>* data);
+      int batch_size, std::vector<tensorflow::Tensor>* data,
+      bool timeout_as_end = false);
 
   // Returns up to `batch_size` timesteps, stopping at the item limit.
   // An empty result marks exhaustion. Metadata repeats for each item's steps.
+  // With `timeout_as_end`, a timeout also terminates the batch with its prefix.
   absl::Status GetNextTimestepBatch(
-      int batch_size, std::vector<tensorflow::Tensor>* data);
+      int batch_size, std::vector<tensorflow::Tensor>* data,
+      bool timeout_as_end = false);
 
   // Cancels all workers and joins their threads. Any blocking or future call
   // to `GetNextTimestep` or `GetNextTrajectory` will return CancelledError
@@ -313,7 +317,7 @@ class Sampler {
   Sampler& operator=(const Sampler&) = delete;
 
  private:
-  absl::Status GetNextBatch(int batch_size, bool timesteps,
+  absl::Status GetNextBatch(int batch_size, bool timesteps, bool timeout_as_end,
                             std::vector<tensorflow::Tensor>* data);
 
   Sampler(std::vector<std::unique_ptr<SamplerWorker>>, const std::string& table,
