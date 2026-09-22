@@ -39,6 +39,8 @@ from reverb.pattern_dataset import PatternDataset
 
 from reverb.platform.default import checkpointers
 
+from reverb.replay_dataset import ReplayDataset
+
 from reverb.replay_sample import ReplaySample
 from reverb.replay_sample import SampleInfo
 

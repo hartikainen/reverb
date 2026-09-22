@@ -30,6 +30,7 @@ reverb_pytype_strict_library(
         ":item_selectors",
         ":pattern_dataset",
         ":rate_limiters",
+        ":replay_dataset",
         ":replay_sample",
         ":server",
         ":structured_writer",
@@ -412,5 +413,22 @@ reverb_py_test(
         ":pattern_dataset",
         ":replay_sample",
         ":structured_writer",
+    ],
+)
+
+reverb_pytype_library(
+    name = "replay_dataset",
+    srcs = ["replay_dataset.py"],
+    deps = [
+        ":client",
+        ":replay_sample",
+    ],
+)
+
+reverb_py_test(
+    name = "replay_dataset_test",
+    srcs = ["replay_dataset_test.py"],
+    deps = [
+        ":reverb",
     ],
 )

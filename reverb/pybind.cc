@@ -397,8 +397,7 @@ PYBIND11_MODULE(libpybind, m) {
              }
              MaybeRaiseFromStatus(status);
              return sampler;
-           },
-           py::arg("table"), py::arg("max_samples"), py::arg("buffer_size"),
+           }, py::arg("table"), py::arg("max_samples"), py::arg("buffer_size"),
            py::arg("num_workers") = -1,
            py::arg("rate_limiter_timeout_ms") = -1)
       .def("NewTrajectoryWriter",
