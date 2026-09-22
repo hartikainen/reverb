@@ -2,6 +2,102 @@ load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
+py_library(
+    name = "input_pipeline",
+    srcs = ["input_pipeline.py"],
+    imports = ["."],
+    deps = [
+        "@pypi//jax",
+        "@pypi//numpy",
+    ],
+)
+
+py_library(
+    name = "replay_fixture",
+    srcs = ["replay_fixture.py"],
+    imports = ["."],
+    deps = [
+        "//reverb",
+        "@pypi//numpy",
+    ],
+)
+
+py_binary(
+    name = "jax_replay",
+    srcs = ["jax_replay.py"],
+    deps = [
+        ":input_pipeline",
+        ":replay_fixture",
+        "@pypi//jax",
+        "@pypi//numpy",
+    ],
+)
+
+py_library(
+    name = "benchmark_lib",
+    srcs = [
+        "compare_benchmarks.py",
+        "replay_benchmark.py",
+    ],
+    imports = ["."],
+    deps = [
+        ":input_pipeline",
+        ":replay_fixture",
+        "//reverb",
+        "//reverb:grain",
+        "@pypi//grain",
+        "@pypi//jax",
+        "@pypi//numpy",
+    ],
+)
+
+py_binary(
+    name = "replay_benchmark",
+    srcs = ["replay_benchmark.py"],
+    deps = [":benchmark_lib"],
+)
+
+py_binary(
+    name = "compare_benchmarks",
+    srcs = ["compare_benchmarks.py"],
+)
+
+py_test(
+    name = "input_pipeline_test",
+    size = "small",
+    srcs = ["input_pipeline_test.py"],
+    env = {
+        "JAX_PLATFORMS": "cpu",
+        "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
+    },
+    deps = [
+        ":input_pipeline",
+        "@pypi//jax",
+        "@pypi//numpy",
+    ],
+)
+
+py_test(
+    name = "replay_benchmark_test",
+    size = "small",
+    srcs = ["replay_benchmark_test.py"],
+    env = {"JAX_PLATFORMS": "cpu"},
+    deps = [":benchmark_lib"],
+)
+
+py_binary(
+    name = "grain_replay",
+    srcs = ["grain_replay.py"],
+    deps = [
+        ":input_pipeline",
+        ":replay_fixture",
+        "//reverb",
+        "//reverb:grain",
+        "@pypi//jax",
+        "@pypi//numpy",
+    ],
+)
+
 py_binary(
     name = "dataset_semantics",
     srcs = ["dataset_semantics.py"],

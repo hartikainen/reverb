@@ -549,6 +549,112 @@ read live server state, so restart does not replay the same sequence. Iterator
 checkpoint restoration, Grain's checkpoint-dependent prefetch transforms, and
 Grain multiprocessing transforms are unsupported.
 
+```sh
+bazel run //examples:grain_replay -- --steps=100
+bazel run //examples:grain_replay -- --sharded --steps=100
+```
+
+The example places only data on a JAX device or local-device sharding, keeps
+`uint64` keys on the host, bounds dispatched updates, and closes the pipeline.
+Dataset sampling runs on the host while the compiled learner runs on the device.
+
+### Runnable input examples and throughput benchmarks
+
+`//examples:jax_replay` trains a linear predictor from a populated replay table.
+The `prefetch` pattern prepares device batches on a bounded host worker while
+`jax.jit` executes the learner. The `sharded` pattern splits the batch across
+local devices with `NamedSharding` and replicates the model parameters. Both
+patterns require fixed batch shapes. The examples support a single JAX process.
+
+```sh
+bazel run //examples:jax_replay -- --pattern=prefetch
+bazel run //examples:jax_replay -- --pattern=sharded
+bazel run //examples:jax_replay -- --pattern=callback
+```
+
+The `callback` pattern requests batches from inside `lax.scan` using ordered
+`jax.experimental.io_callback` effects. Compilation uses shape specifications
+and does not consume replay samples. Sampling executes on the host at runtime,
+with fixed result shapes and dtypes. The callback contains no differentiated
+arguments. Ordered callbacks cannot be mapped with `vmap`; this example does
+not implement distributed callback coordination. See the
+[JAX callback contract](https://docs.jax.dev/en/latest/external-callbacks.html).
+
+Each example owns and closes its sampler, bounds pending host work and
+dispatched update windows, and waits for device work before teardown. The
+learner consumes data without priority updates. A learner that updates priorities
+must carry each sample's host `uint64` keys alongside its corresponding batch.
+`ReplayDataset` crosses into Python once per batch and restores the table's nested
+structure there. The Grain example uses `reverb.grain.TrajectoryDataset`. Grain's
+[training guide](https://google-grain.readthedocs.io/en/latest/tutorials/jax_training_tutorial.html)
+uses the same separation between host preparation and compiled computation.
+
+`//examples:replay_benchmark` measures `host`, `device`, `learner`, `prefetch`,
+and `callback` consumers. Its adapters cover `numpy-trajectory`,
+`tf-trajectory`, `tf-timestep`, `tf-pattern`, `grain-trajectory`, `grain-timestep`,
+and `grain-pattern`. The pattern adapters use native array input paths.
+`grain-step-pattern` and `tf-generator-pattern` compare Python-driven step sources.
+Selecting `numpy-timestep` or
+`numpy-pattern` produces an `unsupported` JSON result and a nonzero exit code;
+use the corresponding `grain-*` adapters to measure timestep and pattern inputs.
+Pattern measurements apply sliding windows to local episodes, with episode
+boundaries respected. They do not measure replay server sampling.
+
+```sh
+bazel run //examples:replay_benchmark -- \
+  --adapter=numpy-trajectory --consumer=prefetch \
+  --revision="$(git rev-parse HEAD)" --output=/tmp/replay-native.json
+```
+
+The `--revision` argument identifies the commit used to build Reverb, not the
+checkout containing the benchmark script. For wheel comparisons, run the same
+script from isolated environments containing the respective wheels. The
+TensorFlow baseline needs a wheel that exposes the TensorFlow datasets. The
+NumPy adapter can run against either native backend when the wheel exposes
+`ReplayDataset`. A JAX consumer also needs JAX installed in that environment.
+
+```sh
+/path/to/tensorflow-env/bin/python examples/replay_benchmark.py \
+  --adapter=tf-trajectory --consumer=host \
+  --revision=TF_WHEEL_COMMIT --output=/tmp/replay-tf.json
+/path/to/native-env/bin/python examples/replay_benchmark.py \
+  --adapter=numpy-trajectory --consumer=host \
+  --revision=NATIVE_WHEEL_COMMIT --output=/tmp/replay-numpy.json
+bazel run //examples:compare_benchmarks -- \
+  --baseline=/tmp/replay-tf.json --candidate=/tmp/replay-numpy.json
+```
+
+`--transport=grpc` starts the replay server in a separate process, preventing
+Reverb's local-table optimization from bypassing RPC. `--transport=local`
+measures that optimization separately. Fixture insertion, iterator creation,
+compilation, and `--warmup` batches precede timing. `--sync-every` bounds queued
+device work and sets the compiled callback loop length. Timed windows include
+completion of all submitted device work, following the
+[JAX benchmarking guidance](https://docs.jax.dev/en/latest/benchmarking.html).
+
+JSON output includes configuration, benchmark source hashes, package versions,
+per-trial throughput, batch-read wait percentiles, client CPU time, process peak
+resident memory, device identity, and host load. Peak memory includes setup and
+compilation and excludes a separate server process. Read-wait latency measures
+input delivery to the consumer, not accelerator completion. Output timestep
+counts include overlapping timesteps for pattern windows.
+
+Run matching payload sizes, batch sizes, worker counts, transport, and consumer
+settings. Increase `--batches` until the short-window warning clears, and repeat
+on an otherwise idle host. Compare small observations and larger trajectories
+separately. To isolate adapter overhead, compare adapters on the same native
+backend before comparing the native backends themselves. The linear learner
+is a workload example; application training needs its own end-to-end check.
+
+The comparison command rejects missing coverage, noisy or short measurements,
+and mismatched settings, versions, devices, or benchmark sources. Its
+`--max-regression` argument sets the tolerated throughput reduction. It passes
+only when the slowest candidate trial meets the tolerance against the fastest
+baseline trial. A ratio range that straddles the tolerance produces an
+inconclusive result. This is a conservative screening rule, not a statistical
+confidence interval. A passing trajectory comparison does not establish
+parity for timestep or pattern datasets.
+
 `//examples:dataset_semantics_test` checks Grain against outputs generated by
 TensorFlow `2.21.0` and Reverb `928a50dbdc77`. The fixture covers pattern conditions,
 multiple configurations, episode boundaries, data, metadata, sampling limits,
