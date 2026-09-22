@@ -20,6 +20,7 @@
 #include <list>
 #include <memory>
 #include <numeric>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -312,6 +313,82 @@ TEST(SampleTest, IsComposedOfTimesteps) {
       /*column_chunks=*/{{MakeTensor(5)}, {MakeTensor(10)}},
       /*squeeze_columns=*/{false});
   EXPECT_FALSE(non_timestep_sample.is_composed_of_timesteps());
+}
+
+TEST(SampleTest, TimestepsAcrossDifferentColumnChunkBoundaries) {
+  auto values = MakeTensor(7);
+  Sample sample(std::make_shared<SampleInfo>(),
+                {{values.Slice(0, 2), values.Slice(2, 7)},
+                 {values.Slice(0, 4), values.Slice(4, 7)}},
+                {false, false});
+  for (int i = 0; i < 7; ++i) {
+    EXPECT_FALSE(sample.is_end_of_sample());
+    EXPECT_TRUE(sample.is_composed_of_timesteps());
+    auto step = sample.GetNextTimestep();
+    ASSERT_THAT(step, SizeIs(2));
+    ExpectTensorEqual<uint64_t>(
+        tensorflow::tensor::DeepCopy(values.SubSlice(i)), step[0]);
+    ExpectTensorEqual<uint64_t>(
+        tensorflow::tensor::DeepCopy(values.SubSlice(i)), step[1]);
+  }
+  EXPECT_TRUE(sample.is_end_of_sample());
+}
+
+TEST(SampleTest, TrajectoryReadsPreserveColumnsAndTimesteps) {
+  const auto values = MakeTensor(4);
+  std::vector<tensorflow::Tensor> retained;
+  {
+    Sample sample(std::make_shared<SampleInfo>(),
+                  {{values}, {values.Slice(0, 2), values.Slice(2, 4)}},
+                  {false, false});
+    for (int read = 0; read < 3; ++read) {
+      std::vector<tensorflow::Tensor> data;
+      REVERB_ASSERT_OK(sample.AsTrajectory(&data));
+      ASSERT_THAT(data, SizeIs(2));
+      for (const auto& column : data)
+        ExpectTensorEqual<uint64_t>(column, values);
+      retained = std::move(data);
+    }
+    for (int i = 0; i < 4; ++i) {
+      auto step = sample.GetNextTimestep();
+      ASSERT_THAT(step, SizeIs(2));
+      for (const auto& column : step) {
+        ExpectTensorEqual<uint64_t>(
+            column, tensorflow::tensor::DeepCopy(values.SubSlice(i)));
+      }
+    }
+    EXPECT_TRUE(sample.is_end_of_sample());
+  }
+  for (const auto& column : retained)
+    ExpectTensorEqual<uint64_t>(column, values);
+}
+
+TEST(SampleTest, RepeatedSqueezedTrajectoryReadsPreserveStrings) {
+  tensorflow::Tensor values(tensorflow::DT_STRING, {1, 2});
+  values.flat<tensorflow::tstring>()(0) = "first";
+  values.flat<tensorflow::tstring>()(1) = std::string(256, 'x');
+  Sample sample(std::make_shared<SampleInfo>(), {{values}}, {true});
+  for (int read = 0; read < 3; ++read) {
+    std::vector<tensorflow::Tensor> data;
+    REVERB_ASSERT_OK(sample.AsTrajectory(&data));
+    ASSERT_THAT(data, SizeIs(1));
+    EXPECT_EQ(data[0].shape(), tensorflow::TensorShape({2}));
+    EXPECT_EQ(data[0].flat<tensorflow::tstring>()(0), "first");
+    EXPECT_EQ(data[0].flat<tensorflow::tstring>()(1), std::string(256, 'x'));
+  }
+}
+
+TEST(SampleTest, FailedTrajectoryReadsPreserveColumnsAndOutput) {
+  const auto values = MakeTensor(2);
+  Sample sample(std::make_shared<SampleInfo>(), {{values}}, {true});
+  std::vector<tensorflow::Tensor> data{MakeTensor(3)};
+  for (int read = 0; read < 2; ++read) {
+    EXPECT_EQ(sample.AsTrajectory(&data).code(), absl::StatusCode::kInternal);
+    ASSERT_THAT(data, SizeIs(1));
+    ExpectTensorEqual<uint64_t>(data[0], MakeTensor(3));
+  }
+  auto step = sample.GetNextTimestep();
+  ExpectTensorEqual<uint64_t>(step[0], MakeTensor(2).SubSlice(0));
 }
 
 TEST(GrpcSamplerTest, TrajectoryAcrossResponseBoundaries) {

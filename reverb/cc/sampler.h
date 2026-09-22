@@ -17,7 +17,6 @@
 
 #include <stddef.h>
 
-#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -62,7 +61,7 @@ class Sample {
   std::vector<tensorflow::Tensor> GetNextTimestep();
 
   // Returns the trajectory as a flat sequence of tensors representing the
-  // columns of the flattened trajectory.
+  // columns of the flattened trajectory without consuming the sample.
   //
   // Fails with `DataLossError` if `GetNextTimestep()` has already been called
   // on this sample.
@@ -87,20 +86,10 @@ class Sample {
   // `is_timestep_sample()` is true.
   int64_t num_timesteps_;
 
-  struct ColumnChunk {
-    // Unpacked chunk, and potentially sliced, chunk content.
-    tensorflow::Tensor tensor;
-
-    // Index of the next sub slice to return when emitting timesteps.
-    int offset = 0;
-  };
-
-  // Flat trajectory data. Each column uses a deque so the batched tensor can be
-  // deallocated as soon as all its content has been emitted through
-  // `GetNextTimestep`. If the data is retrieved with `AsBatchedTimesteps` or
-  // `AsTrajectory` then the column chunks are concatenated instead of
-  // subsliced.
-  std::vector<std::deque<ColumnChunk>> columns_;
+  // Reuse decoded column storage and release each chunk after its last step.
+  std::vector<std::vector<tensorflow::Tensor>> columns_;
+  std::vector<size_t> next_chunk_;
+  std::vector<int> next_offset_;
 
   // Columns where the batch dimension should be emitted. This is only respected
   // by `AsTrajectory`.

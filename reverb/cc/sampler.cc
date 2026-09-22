@@ -793,20 +793,14 @@ Sample::Sample(std::shared_ptr<const SampleInfo> info,
                std::vector<bool> squeeze_columns)
     : info_(std::move(info)),
       num_timesteps_(-1),
+      columns_(std::move(column_chunks)),
+      next_chunk_(columns_.size(), 0),
+      next_offset_(columns_.size(), 0),
       squeeze_columns_(std::move(squeeze_columns)),
       next_timestep_called_(false) {
-  REVERB_CHECK(!column_chunks.empty()) << "Must provide at least one chunk.";
-  REVERB_CHECK(!column_chunks.front().empty())
+  REVERB_CHECK(!columns_.empty()) << "Must provide at least one chunk.";
+  REVERB_CHECK(!columns_.front().empty())
       << "Chunks must hold at least one tensor.";
-
-  columns_.reserve(column_chunks.size());
-  for (auto& chunks : column_chunks) {
-    std::deque<ColumnChunk> slices;
-    for (auto& chunk : chunks) {
-      slices.push_back({std::move(chunk), 0});
-    }
-    columns_.push_back(std::move(slices));
-  }
 
   if (is_composed_of_timesteps()) {
     num_timesteps_ = 0;
@@ -814,7 +808,7 @@ Sample::Sample(std::shared_ptr<const SampleInfo> info,
       // Note that we can safely assume that the tensor is not a scalar since a
       // batch dimension is always added when building a chunk. A scalar would
       // thus be represented as a tensor of shape [1].
-      num_timesteps_ += column_slice.tensor.dim_size(0);
+      num_timesteps_ += column_slice.dim_size(0);
     }
   }
 }
@@ -829,15 +823,18 @@ std::vector<tensorflow::Tensor> Sample::GetNextTimestep() {
   std::vector<tensorflow::Tensor> result;
   result.reserve(columns_.size());
 
-  for (auto& col : columns_) {
-    auto slice = col.front().tensor.SubSlice(col.front().offset++);
+  for (size_t i = 0; i < columns_.size(); ++i) {
+    auto& chunk = columns_[i][next_chunk_[i]];
+    auto slice = chunk.SubSlice(next_offset_[i]++);
     if (!slice.IsAligned()) {
       slice = tensorflow::tensor::DeepCopy(slice);
     }
     result.push_back(std::move(slice));
 
-    if (col.front().offset == col.front().tensor.dim_size(0)) {
-      col.pop_front();
+    if (next_offset_[i] == chunk.dim_size(0)) {
+      chunk = tensorflow::Tensor();
+      ++next_chunk_[i];
+      next_offset_[i] = 0;
     }
   }
 
@@ -845,19 +842,22 @@ std::vector<tensorflow::Tensor> Sample::GetNextTimestep() {
 }
 
 bool Sample::is_end_of_sample() const {
-  return std::all_of(columns_.begin(), columns_.end(),
-                     [](const auto& c) { return c.empty(); });
+  for (size_t i = 0; i < columns_.size(); ++i) {
+    if (next_chunk_[i] != columns_[i].size()) return false;
+  }
+  return true;
 }
 
 bool Sample::is_composed_of_timesteps() const {
   int prev_column_length = -1;
-  for (const auto& col : columns_) {
-    int column_length = 0;
-    for (const auto& column_slice : col) {
+  for (size_t i = 0; i < columns_.size(); ++i) {
+    int column_length = -next_offset_[i];
+    for (size_t j = next_chunk_[i]; j < columns_[i].size(); ++j) {
+      const auto& column_slice = columns_[i][j];
       // Note that we can safely assume that the tensor is not a scalar since a
       // batch dimension is always added when building a chunk. A scalar would
       // thus be represented as a tensor of shape [1].
-      column_length += column_slice.tensor.dim_size(0);
+      column_length += column_slice.dim_size(0);
     }
 
     if (prev_column_length != -1 && prev_column_length != column_length) {
@@ -878,20 +878,11 @@ absl::Status Sample::AsTrajectory(std::vector<tensorflow::Tensor>* data) {
   // Unpack the data columns.
   for (int i = 0; i < columns_.size(); i++) {
     const auto& column = columns_[i];
-    // If the column is made up of a single batched tensor then there will be no
-    // need for concatenation so we can save ourselves a copy by simply moving
-    // the one (unpacked) chunk into sequences.
+    // Sharing tensor storage preserves repeated reads without copying payloads.
     if (column.size() == 1) {
-      sequences[i] = std::move(column.front().tensor);
+      sequences[i] = column.front();
     } else {
-      std::vector<tensorflow::Tensor> column_tensors;
-      column_tensors.reserve(column.size());
-      for (auto& slice : column) {
-        column_tensors.push_back(std::move(slice.tensor));
-      }
-
-      REVERB_RETURN_IF_ERROR(
-          tensorflow::tensor::Concat(column_tensors, &sequences[i]));
+      REVERB_RETURN_IF_ERROR(tensorflow::tensor::Concat(column, &sequences[i]));
     }
   }
 
