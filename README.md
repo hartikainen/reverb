@@ -446,3 +446,40 @@ If you use this code, please cite the
 [HER]: https://arxiv.org/abs/1707.01495
 [PER]: https://arxiv.org/abs/1511.05952
 [SAC]: https://arxiv.org/abs/1801.01290
+
+### Grain datasets
+
+Install `dm-reverb[grain]`, or depend on `@reverb//reverb:grain`. Grain `0.2.18` requires Python `3.11` or later.
+Importing `reverb` does not import Grain.
+
+```python
+from reverb import grain as reverb_grain
+
+source = reverb_grain.TrajectoryDataset(
+    "localhost:8000", "experience", batch_size=256)
+with iter(reverb_grain.prefetch(source, buffer_size=2)) as batches:
+    for sample in batches:
+        state = learner_step(state, sample.data)
+```
+
+`TrajectoryDataset` and `TimestepDataset` are Grain `IterDataset` sources.
+Both use native sampler batching and return `ReplaySample` values with NumPy
+metadata. Trajectories retain the time dimension. Timesteps flatten each item's
+trajectory and repeat its metadata, with batches allowed to cross item boundaries.
+`max_samples` counts replay items in both interfaces. `drop_remainder` applies to
+output batches. Within a timestep item, columns must have matching lengths.
+
+`PatternDataset(input_dataset, configs, respect_episode_boundaries,
+is_end_of_episode)` applies `structured_writer.create_config` patterns to a Grain
+stream of steps. It uses Reverb's native pattern conditions, slices, and episode
+handling, and returns the pattern's nested data structure. `pattern_dataset_with_info`
+adds zero-valued metadata. Input exhaustion does not implicitly end an episode.
+
+Grain `map`, `filter`, and `batch` compose with these datasets. Use
+`reverb_grain.prefetch` for a bounded background queue that cancels its upstream
+sampler before joining its worker. Close the outer iterator on early termination.
+Each iterator owns its sampler or pattern history. Construct iterators inside
+learner processes instead of sharing them across processes. Independent samplers
+read live server state, so restart does not replay the same sequence. Iterator
+checkpoint restoration, Grain's checkpoint-dependent prefetch transforms, and
+Grain multiprocessing transforms are unsupported.

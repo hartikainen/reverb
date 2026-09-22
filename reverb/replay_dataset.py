@@ -77,8 +77,9 @@ class ReplayDataset:
 
 class _ReplayIterator:
 
-  def __init__(self, dataset):
+  def __init__(self, dataset, *, timesteps=False):
     self._dataset = dataset
+    self._timesteps = timesteps
     self._closed = False
     self._count = 0
     self._sampler = None
@@ -104,14 +105,17 @@ class _ReplayIterator:
       raise StopIteration
     try:
       count = self._dataset.batch_size
-      if self._dataset.max_samples is not None:
-        count = min(count, self._dataset.max_samples - self._count)
-      if count == 0:
-        self.close()
-        raise StopIteration
-      values = self._sampler.GetNextTrajectoryBatch(count)
+      if self._timesteps:
+        values = ([] if self._sampler is None else
+                  self._sampler.GetNextTimestepBatch(count))
+        count = len(values[0]) if values else 0
+      else:
+        if self._dataset.max_samples is not None:
+          count = min(count, self._dataset.max_samples - self._count)
+        values = self._sampler.GetNextTrajectoryBatch(count) if count else []
       self._count += count
-      if count != self._dataset.batch_size and self._dataset.drop_remainder:
+      if count == 0 or (count != self._dataset.batch_size and
+                        self._dataset.drop_remainder):
         self.close()
         raise StopIteration
       info = replay_sample.SampleInfo(*values[:5])

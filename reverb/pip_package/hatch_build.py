@@ -40,5 +40,7 @@ class MetaDataHook(MetadataHookInterface):
   def update(self, metadata: dict[str, Any]) -> None:
     metadata['version'] = os.environ['version']
     tf_version = os.environ['tf_version']
-    metadata['optional-dependencies'] = {'tensorflow': [tf_version]}
+    metadata['optional-dependencies'] = {
+        'tensorflow': [tf_version],
+        'grain': ['grain>=0.2.18']}
     metadata['name'] = os.environ['project_name']

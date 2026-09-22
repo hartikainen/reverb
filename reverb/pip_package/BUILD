@@ -33,6 +33,7 @@ reverb_wheel(
     source_files = [
         "//:LICENSE",
         "//:README.md",
+        "//reverb:grain.py",
         "hatch_build.py",
         "pyproject.toml",
     ],

@@ -8,3 +8,4 @@ pybind11==3.0.1
 tensorflow==2.21.0
 build
 hatchling>=1.27
+grain>=0.2.18; python_version >= '3.11'

@@ -17,7 +17,10 @@ package(
 
 licenses(["notice"])
 
-exports_files(["LICENSE"])
+exports_files([
+    "LICENSE",
+    "grain.py",
+])
 
 reverb_pytype_strict_library(
     name = "reverb",
@@ -432,5 +435,29 @@ reverb_py_test(
     srcs = ["replay_dataset_test.py"],
     deps = [
         ":reverb",
+    ],
+)
+
+
+reverb_pytype_library(
+    name = "grain",
+    srcs = ["grain.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pybind",
+        ":replay_dataset",
+        ":replay_sample",
+        ":structured_writer",
+        "@pypi//grain",
+    ],
+)
+
+reverb_py_test(
+    name = "grain_test",
+    srcs = ["grain_test.py"],
+    deps = [
+        ":grain",
+        ":reverb",
+        "@pypi//grain",
     ],
 )
