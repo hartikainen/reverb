@@ -292,6 +292,12 @@ class Sampler {
       std::vector<tensorflow::Tensor>* data,
       std::shared_ptr<const SampleInfo>* info = nullptr);
 
+  // Returns exactly `batch_size` trajectories with batched metadata prepended.
+  // Shapes and dtypes must agree across samples. On error, consumed samples
+  // are not restored and `data` is unchanged. Concurrent reads are unsupported.
+  absl::Status GetNextTrajectoryBatch(
+      int batch_size, std::vector<tensorflow::Tensor>* data);
+
   // Cancels all workers and joins their threads. Any blocking or future call
   // to `GetNextTimestep` or `GetNextTrajectory` will return CancelledError
   // without blocking.

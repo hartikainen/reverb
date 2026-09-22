@@ -143,8 +143,25 @@ absl::Status StringTensorToPyArray(const tensorflow::Tensor &tensor,
   return absl::OkStatus();
 }
 
+const std::pair<tensorflow::DataType, const char*> kExtendedDtypes[] = {
+    {tensorflow::DT_BFLOAT16, "bfloat16"},
+    {tensorflow::DT_FLOAT8_E4M3FN, "float8_e4m3fn"},
+    {tensorflow::DT_FLOAT8_E5M2, "float8_e5m2"},
+};
+
+bool ExtendedDtypeDescriptor(const char* name, PyArray_Descr** out) {
+  auto object = make_safe(PyUnicode_FromString(name));
+  return object && PyArray_DescrConverter(object.get(), out);
+}
+
 absl::Status GetPyDescrFromDataType(tensorflow::DataType dtype,
                                     PyArray_Descr **out_descr) {
+  for (const auto& [extended, name] : kExtendedDtypes) {
+    if (dtype == extended) {
+      return ExtendedDtypeDescriptor(name, out_descr) ? absl::OkStatus() :
+          absl::InternalError("Cannot resolve the NumPy extended dtype");
+    }
+  }
   switch (dtype) {
 #define TF_TO_PY_ARRAY_TYPE_CASE(TF_DTYPE, PY_ARRAY_TYPE) \
   case TF_DTYPE:                                          \
@@ -185,6 +202,20 @@ absl::Status GetPyDescrFromTensor(const tensorflow::Tensor &tensor,
 absl::Status GetTensorDtypeFromPyArray(PyArrayObject *array,
                                        tensorflow::DataType *out_tf_datatype) {
   int pyarray_type = PyArray_TYPE(array);
+  if (pyarray_type >= NPY_USERDEF) {
+    for (const auto& [dtype, name] : kExtendedDtypes) {
+      PyArray_Descr* descriptor = nullptr;
+      if (!ExtendedDtypeDescriptor(name, &descriptor)) {
+        return absl::InternalError("Cannot resolve the NumPy extended dtype");
+      }
+      bool matches = PyArray_EquivTypes(PyArray_DESCR(array), descriptor);
+      Py_DECREF(descriptor);
+      if (matches) {
+        *out_tf_datatype = dtype;
+        return absl::OkStatus();
+      }
+    }
+  }
   switch (pyarray_type) {
 #define NP_TO_TF_DTYPE_CASE(NP_DTYPE, TF_DTYPE) \
   case NP_DTYPE:                                \

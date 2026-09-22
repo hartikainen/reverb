@@ -15,19 +15,20 @@
 #include "reverb/cc/sampler.h"
 
 #include <algorithm>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "grpcpp/impl/codegen/client_context.h"
-#include "grpcpp/impl/codegen/sync_stream.h"
 #include "absl/memory/memory.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "grpcpp/impl/codegen/client_context.h"
+#include "grpcpp/impl/codegen/sync_stream.h"
 #include "reverb/cc/chunk_store.h"
 #include "reverb/cc/errors.h"
 #include "reverb/cc/platform/hash_map.h"
@@ -41,9 +42,9 @@
 #include "reverb/cc/support/grpc_util.h"
 #include "reverb/cc/support/trajectory_util.h"
 #include "reverb/cc/table.h"
-#include "reverb/cc/tensor_compression.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_util.h"
+#include "reverb/cc/tensor_compression.h"
 
 namespace deepmind {
 namespace reverb {
@@ -570,6 +571,65 @@ absl::Status Sampler::GetNextTrajectory(
 
   absl::WriterMutexLock lock(mu_);
   if (++returned_ == max_samples_) samples_.Close();
+  return absl::OkStatus();
+}
+
+absl::Status Sampler::GetNextTrajectoryBatch(
+    int batch_size, std::vector<tensorflow::Tensor>* data) {
+  if (batch_size <= 0) {
+    return absl::InvalidArgumentError("`batch_size` must be positive.");
+  }
+  std::vector<tensorflow::Tensor> sample;
+  std::shared_ptr<const SampleInfo> info;
+  REVERB_RETURN_IF_ERROR(GetNextTrajectory(&sample, &info));
+
+  std::vector<tensorflow::Tensor> batch;
+  batch.reserve(kNumInfoTensors + sample.size());
+  for (auto dtype : {tensorflow::DT_UINT64, tensorflow::DT_DOUBLE, tensorflow::DT_INT64,
+                     tensorflow::DT_DOUBLE, tensorflow::DT_INT32}) {
+    batch.emplace_back(dtype, tensorflow::TensorShape({batch_size}));
+  }
+  std::vector<tensorflow::TensorShape> shapes;
+  for (const auto& column : sample) {
+    shapes.push_back(column.shape());
+    auto shape = column.shape();
+    shape.InsertDim(0, batch_size);
+    batch.emplace_back(column.dtype(), shape);
+  }
+
+  for (int row = 0; row < batch_size; ++row) {
+    if (row != 0) {
+      REVERB_RETURN_IF_ERROR(GetNextTrajectory(&sample, &info));
+    }
+    if (sample.size() != shapes.size()) {
+      return absl::InvalidArgumentError(
+          "Trajectory column counts must agree within a batch.");
+    }
+    batch[0].flat<uint64_t>()(row) = info->item().key();
+    batch[1].flat<double>()(row) = info->probability();
+    batch[2].flat<int64_t>()(row) = info->table_size();
+    batch[3].flat<double>()(row) = info->item().priority();
+    batch[4].flat<int32_t>()(row) = info->item().times_sampled();
+    for (size_t col = 0; col < sample.size(); ++col) {
+      const auto& source = sample[col];
+      auto& target = batch[kNumInfoTensors + col];
+      if (source.dtype() != target.dtype() || source.shape() != shapes[col]) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "Trajectory shapes and dtypes must agree within a batch at column ",
+            col, "."));
+      }
+      if (source.NumElements() == 0) continue;
+      if (source.dtype() == tensorflow::DT_STRING) {
+        std::copy_n(source.flat<tensorflow::tstring>().data(), source.NumElements(),
+                    target.flat<tensorflow::tstring>().data() +
+                        row * source.NumElements());
+      } else {
+        std::memcpy(static_cast<char*>(target.data()) + row * source.TotalBytes(),
+                    source.data(), source.TotalBytes());
+      }
+    }
+  }
+  *data = std::move(batch);
   return absl::OkStatus();
 }
 

@@ -63,6 +63,9 @@ class Sampler:
 
   def Close(self) -> None: ...
 
+  def GetNextTrajectoryBatch(self, batch_size: int) -> List[np.ndarray]:
+    ...
+
 
 
 class Client:

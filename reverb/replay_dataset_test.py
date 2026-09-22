@@ -49,6 +49,58 @@ class ReplayDatasetTest(unittest.TestCase):
     with iter(self.dataset(max_samples=3)) as batches:
       self.assertEqual(len(list(batches)), 1)
 
+  def test_batch_preserves_dtypes_values_and_metadata(self):
+    for dtype in [np.bool_, np.int8, np.uint8, np.int16, np.uint16,
+                  np.int32, np.uint32, np.int64, np.uint64, np.float16,
+                  np.float32, np.float64, np.complex64, np.complex128,
+                  np.dtype("bfloat16").type]:
+      with self.subTest(dtype=dtype):
+        inputs = [np.array([[0, 1], [1, 0]], dtype=dtype),
+                  np.array([[1, 1], [0, 0]], dtype=dtype)]
+        for value in inputs:
+          self.client.insert(value, {"data": 3.0})
+        with iter(self.dataset(max_samples=2)) as batches:
+          batch = next(batches)
+        np.testing.assert_array_equal(batch.data[0], np.stack(inputs)[:, None])
+        self.assertEqual(batch.data[0].dtype, np.dtype(dtype))
+        self.assertEqual(batch.info.key.dtype, np.dtype("uint64"))
+        self.assertEqual(batch.info.probability.dtype, np.dtype("float64"))
+        self.assertEqual(batch.info.table_size.dtype, np.dtype("int64"))
+        self.assertEqual(batch.info.priority.dtype, np.dtype("float64"))
+        self.assertEqual(batch.info.times_sampled.dtype, np.dtype("int32"))
+        np.testing.assert_array_equal(batch.info.priority, [3.0, 3.0])
+        np.testing.assert_array_equal(batch.info.times_sampled, [1, 1])
+        self.assertEqual(batch.info.key.shape, (2,))
+        self.assertNotEqual(batch.info.key[0], batch.info.key[1])
+
+  def test_strings_and_empty_columns(self):
+    for value in [b"a\x00b", b"c"]:
+      self.client.insert([np.array(value, dtype=object),
+                          np.empty((0, 3), np.float32)], {"data": 1.0})
+    with iter(self.dataset(max_samples=2)) as batches:
+      batch = next(batches)
+    np.testing.assert_array_equal(batch.data[0], [[b"a\x00b"], [b"c"]])
+    self.assertEqual(batch.data[1].shape, (2, 1, 0, 3))
+
+  def test_mismatched_shapes_and_dtypes_close_iterator(self):
+    for second in [np.zeros(3, np.float32), np.zeros(2, np.float64)]:
+      with self.subTest(second=second):
+        self.client.insert(np.zeros(2, np.float32), {"data": 1.0})
+        self.client.insert(second, {"data": 1.0})
+        with iter(self.dataset(max_samples=2)) as batches:
+          with self.assertRaisesRegex(ValueError, "shapes and dtypes"):
+            next(batches)
+          with self.assertRaises(StopIteration):
+            next(batches)
+
+  def test_timeout_discards_partial_batch_and_closes_iterator(self):
+    self.client.insert(np.float32(1), {"data": 1.0})
+    with iter(self.dataset(rate_limiter_timeout_ms=100)) as batches:
+      with self.assertRaises(reverb.DeadlineExceededError):
+        next(batches)
+      with self.assertRaises(StopIteration):
+        next(batches)
+
   def test_close_cancels_empty_table_read(self):
     iterator = iter(self.dataset())
     finished = threading.Event()

@@ -343,6 +343,23 @@ PYBIND11_MODULE(libpybind, m) {
              MaybeRaiseFromStatus(status);
              return Sampler::WithInfoTensors(*info, std::move(data));
            })
+      .def("GetNextTrajectoryBatch",
+           [](Sampler* sampler, int batch_size) {
+             absl::Status status;
+             std::vector<tensorflow::Tensor> data;
+             {
+               py::gil_scoped_release release;
+               status = sampler->GetNextTrajectoryBatch(batch_size, &data);
+             }
+             if (absl::IsDeadlineExceeded(status)) {
+               PyErr_SetString(py::module_::import("reverb.errors")
+                                   .attr("DeadlineExceededError").ptr(),
+                               std::string(status.message()).c_str());
+               throw py::error_already_set();
+             }
+             MaybeRaiseFromStatus(status);
+             return data;
+           }, py::arg("batch_size"))
       .def_property_readonly_static("NUM_INFO_TENSORS", [](py::object) {
         return Sampler::kNumInfoTensors;
       });

@@ -32,11 +32,12 @@ def _positive_integer(value, name):
 
 @dataclasses.dataclass(frozen=True)
 class ReplayDataset:
-  """A live replay stream with native prefetching and NumPy batching.
+  """A live replay stream with native prefetching and batching.
 
   Each iterator owns its sampler. Use it as a context manager to cancel blocked
   reads and release workers when training stops. Samples retain trajectory
   dimensions. A table signature restores nested data, otherwise data is a list.
+  Corresponding data leaves must have identical shapes and dtypes within a batch.
   Iterators do not support checkpoint restoration or deterministic replay.
 
   Attributes:
@@ -101,25 +102,23 @@ class _ReplayIterator:
   def __next__(self):
     if self._closed:
       raise StopIteration
-    samples = []
     try:
-      for _ in range(self._dataset.batch_size):
-        if (self._dataset.max_samples is not None
-            and self._count >= self._dataset.max_samples):
-          break
-        values = self._sampler.GetNextTrajectory()
-        info = replay_sample.SampleInfo(*values[:5])
-        data = values[5:]
-        if self._signature is not None:
-          data = tree.unflatten_as(self._signature, data)
-        samples.append(replay_sample.ReplaySample(info, data))
-        self._count += 1
-      if not samples or (
-          len(samples) != self._dataset.batch_size
-          and self._dataset.drop_remainder):
+      count = self._dataset.batch_size
+      if self._dataset.max_samples is not None:
+        count = min(count, self._dataset.max_samples - self._count)
+      if count == 0:
         self.close()
         raise StopIteration
-      return tree.map_structure(lambda *xs: np.stack(xs), *samples)
+      values = self._sampler.GetNextTrajectoryBatch(count)
+      self._count += count
+      if count != self._dataset.batch_size and self._dataset.drop_remainder:
+        self.close()
+        raise StopIteration
+      info = replay_sample.SampleInfo(*values[:5])
+      data = values[5:]
+      if self._signature is not None:
+        data = tree.unflatten_as(self._signature, data)
+      return replay_sample.ReplaySample(info, data)
     except BaseException as error:
       cancelled = self._closed
       self.close()
