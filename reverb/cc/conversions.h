@@ -29,8 +29,9 @@ namespace pybind {
 // https://pythonextensionpatterns.readthedocs.io/en/latest/cpp_and_numpy.html
 void ImportNumpy();
 
+// With `copy=false`, numeric arrays retain the tensor buffer as read-only views.
 absl::Status TensorToNdArray(const tensorflow::Tensor &tensor,
-                             PyObject **out_ndarray);
+                             PyObject **out_ndarray, bool copy = true);
 
 absl::Status NdArrayToTensor(PyObject *ndarray, tensorflow::Tensor *out_tensor);
 

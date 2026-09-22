@@ -14,6 +14,7 @@
 
 """Grain replay composition, pattern semantics, and cancellation tests."""
 
+import gc
 import os
 import pickle
 import subprocess
@@ -256,6 +257,23 @@ class PatternTest(unittest.TestCase):
 
 
 class BlockPatternTest(unittest.TestCase):
+
+  def test_output_views_outlive_pattern_history(self):
+    data = self.data()
+    dataset = replay.PatternDataset.from_tensor_slices(
+        data, self.configs(), True, lambda block: block["is_last"]).batch(2)
+    iterator = iter(dataset)
+    first = next(iterator)
+    list(iterator)
+    iterator.close()
+    del iterator, dataset
+    data["value"][:] = -1
+    gc.collect()
+    np.testing.assert_array_equal(first["window"], [[0, 1], [1, 2]])
+    self.assertFalse(first["window"].flags.writeable)
+    self.assertFalse(first["window"].flags.owndata)
+    with self.assertRaises(ValueError):
+      first["window"][0, 0] = 10
 
   def data(self):
     return {"value": np.arange(11, dtype=np.int32),

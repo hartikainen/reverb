@@ -319,6 +319,16 @@ namespace {
 
 namespace py = pybind11;
 
+py::list BatchToNdArrays(const std::vector<tensorflow::Tensor>& batch) {
+  py::list result;
+  for (const auto& value : batch) {
+    PyObject* array = nullptr;
+    MaybeRaiseFromStatus(pybind::TensorToNdArray(value, &array, false));
+    result.append(py::reinterpret_steal<py::object>(array));
+  }
+  return result;
+}
+
 PYBIND11_MODULE(libpybind, m) {
   // Initialization code to use numpy types in the type casters.
   pybind::ImportNumpy();
@@ -463,7 +473,7 @@ PYBIND11_MODULE(libpybind, m) {
           status = writer->Read(batch_size, clear_buffers, flush, &output);
         }
         MaybeRaiseFromStatus(status);
-        return output;
+        return BatchToNdArrays(output);
       })
       .def("Close", &PatternWriter::Close);
 
@@ -508,7 +518,7 @@ PYBIND11_MODULE(libpybind, m) {
                throw py::error_already_set();
              }
              MaybeRaiseFromStatus(status);
-             return data;
+             return BatchToNdArrays(data);
            }, py::arg("batch_size"), py::arg("timeout_as_end") = false)
       .def("GetNextTimestepBatch",
            [](Sampler* sampler, int batch_size, bool timeout_as_end) {
@@ -525,7 +535,7 @@ PYBIND11_MODULE(libpybind, m) {
                throw py::error_already_set();
              }
              MaybeRaiseFromStatus(status);
-             return data;
+             return BatchToNdArrays(data);
            }, py::arg("batch_size"), py::arg("timeout_as_end") = false)
       .def_property_readonly_static("NUM_INFO_TENSORS", [](py::object) {
         return Sampler::kNumInfoTensors;

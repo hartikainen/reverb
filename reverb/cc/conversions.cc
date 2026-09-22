@@ -316,7 +316,7 @@ absl::Status NdArrayToTensor(PyObject *ndarray,
 }
 
 absl::Status TensorToNdArray(const tensorflow::Tensor &tensor,
-                             PyObject **out_ndarray) {
+                             PyObject **out_ndarray, bool copy) {
   TF_RETURN_IF_ERROR(VerifyDtypeIsSupported(tensor.dtype()));
 
   // Extract the numpy type and dimensions.
@@ -326,6 +326,28 @@ absl::Status TensorToNdArray(const tensorflow::Tensor &tensor,
   absl::InlinedVector<npy_intp, 4> dims(tensor.dims());
   for (int i = 0; i < tensor.dims(); i++) {
     dims[i] = tensor.dim_size(i);
+  }
+
+  if (!copy && tensorflow::DataTypeCanUseMemcpy(tensor.dtype())) {
+    auto owner = std::make_unique<tensorflow::Tensor>(tensor);
+    auto array = make_safe(PyArray_NewFromDescr(
+        &PyArray_Type, descr, dims.size(), dims.data(), nullptr,
+        const_cast<void*>(tensor.data()), NPY_ARRAY_C_CONTIGUOUS | NPY_ARRAY_ALIGNED,
+        nullptr));
+    if (!array) return absl::InternalError("Could not construct ndarray view");
+    auto capsule = make_safe(PyCapsule_New(
+        owner.get(), "reverb.tensor", [](PyObject* capsule) {
+          delete static_cast<tensorflow::Tensor*>(
+              PyCapsule_GetPointer(capsule, "reverb.tensor"));
+        }));
+    if (!capsule) return absl::InternalError("Could not retain tensor storage");
+    owner.release();
+    if (PyArray_SetBaseObject(reinterpret_cast<PyArrayObject*>(array.get()),
+                              capsule.release()) != 0) {
+      return absl::InternalError("Could not attach tensor storage to ndarray");
+    }
+    *out_ndarray = array.release();
+    return absl::OkStatus();
   }
 
   // Allocate an empty array of the desired shape and type.

@@ -502,6 +502,8 @@ Rate-limiter timeouts end the sequence and allow a final partial batch when
 error. `dtypes` and `shapes` optionally validate and restore an explicit data
 structure, including tables without signatures. `max_samples_per_stream` controls
 RPC stream rotation, and `num_workers=-1` requests automatic worker selection.
+Numeric native batches retain their C++ storage as read-only NumPy views.
+Copy an array before modifying it. String arrays use separate NumPy storage.
 
 `PatternDataset(input_dataset, configs, respect_episode_boundaries,
 is_end_of_episode)` applies `structured_writer.create_config` patterns to a Grain

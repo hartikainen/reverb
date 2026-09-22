@@ -38,6 +38,7 @@ class ReplayDataset:
   reads and release workers when training stops. Samples retain trajectory
   dimensions. A table signature restores nested data, otherwise data is a list.
   Corresponding data leaves must have identical shapes and dtypes within a batch.
+  Numeric batches retain native storage as read-only NumPy views.
   Iterators do not support checkpoint restoration or deterministic replay.
 
   Attributes:

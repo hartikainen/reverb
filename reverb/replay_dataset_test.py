@@ -14,6 +14,7 @@
 
 """Replay stream batching, cancellation, and learner integration tests."""
 
+import gc
 import threading
 import unittest
 
@@ -81,6 +82,24 @@ class ReplayDatasetTest(unittest.TestCase):
       batch = next(batches)
     np.testing.assert_array_equal(batch.data[0], [[b"a\x00b"], [b"c"]])
     self.assertEqual(batch.data[1].shape, (2, 1, 0, 3))
+
+  def test_native_buffers_outlive_iterator_and_remain_read_only(self):
+    for value in range(3):
+      self.client.insert(np.arange(16, dtype=np.float32) + value, {"data": 1.0})
+    iterator = iter(self.dataset(max_samples=3, drop_remainder=False))
+    first, last = next(iterator), next(iterator)
+    iterator.close()
+    del iterator
+    gc.collect()
+    for sample in [first, last]:
+      for value in list(sample.info) + sample.data:
+        self.assertFalse(value.flags.writeable)
+        self.assertFalse(value.flags.owndata)
+        with self.assertRaises(ValueError):
+          value.reshape(-1)[0] = 0
+    np.testing.assert_array_equal(first.data[0][:, 0],
+                                  np.stack([np.arange(16), np.arange(16) + 1]))
+    np.testing.assert_array_equal(last.data[0][0, 0], np.arange(16) + 2)
 
   def test_mismatched_shapes_and_dtypes_close_iterator(self):
     for second in [np.zeros(3, np.float32), np.zeros(2, np.float64)]:
