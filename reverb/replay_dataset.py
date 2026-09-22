@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Bounded replay sampling for NumPy learners."""
+"""Bounded replay sampling for NumPy and JAX learners."""
 
 import dataclasses
 import operator
@@ -78,6 +78,14 @@ class ReplayDataset:
   def __iter__(self):
     return _ReplayIterator(self)
 
+  def as_jax_iterator(self, device=None):
+    """Place batch data on a JAX device or sharding, retaining host metadata.
+
+    JAX is an optional dependency. Data dtypes must be representable under its
+    configured precision policy. Sample keys remain NumPy `uint64` arrays.
+    """
+    import jax  # pylint: disable=g-import-not-at-top
+    return _DeviceIterator(iter(self), jax, device)
 
 
 class _ReplayIterator:
@@ -146,6 +154,40 @@ class _ReplayIterator:
       self._closed = True
       if self._sampler is not None:
         self._sampler.Close()
+
+  def __enter__(self):
+    return self
+
+  def __exit__(self, *_):
+    self.close()
+
+
+class _DeviceIterator:
+
+  def __init__(self, source, jax, device):
+    self._source = source
+    self._jax = jax
+    self._device = device
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    try:
+      sample = next(self._source)
+      for value in tree.flatten(sample.data):
+        if self._jax.dtypes.canonicalize_dtype(value.dtype) != value.dtype:
+          raise ValueError(
+              f"JAX would change data dtype `{value.dtype}`; cast the data "
+              "or enable `jax_enable_x64`")
+      return replay_sample.ReplaySample(
+          sample.info, self._jax.device_put(sample.data, self._device))
+    except BaseException:
+      self.close()
+      raise
+
+  def close(self):
+    self._source.close()
 
   def __enter__(self):
     return self

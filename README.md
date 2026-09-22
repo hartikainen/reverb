@@ -447,10 +447,38 @@ If you use this code, please cite the
 [PER]: https://arxiv.org/abs/1511.05952
 [SAC]: https://arxiv.org/abs/1801.01290
 
+### JAX learner input
+
+`ReplayDataset` assembles trajectory data and metadata in Reverb's bounded native
+sampler with the GIL released, then exposes a batch of NumPy arrays. Corresponding
+data leaves must have identical shapes and dtypes within each batch. Use a context
+manager so early termination cancels blocked reads and releases sampler workers:
+
+```python
+import reverb
+
+source = reverb.ReplayDataset("localhost:8000", "experience", batch_size=256)
+with source.as_jax_iterator() as batches:
+    for sample in batches:
+        state, priorities = learner_step(state, sample.data)
+        client.mutate_priorities(
+            "experience", dict(zip(sample.info.key, priorities)))
+```
+
+Install the `jax` wheel extra, or depend on `@reverb//reverb:jax` from a
+Bazel Python target, to use `as_jax_iterator`. Only `sample.data` moves
+to the device. Metadata remains on the host, preserving `uint64` replay keys.
+Data that would lose dtype precision under JAX's configuration raises an error.
+The iterator consumes live replay state and does not promise deterministic
+checkpoint restoration. Each learner process should create its own iterator.
+Use `tf.TensorSpec(shape, dtype)` for table signatures. The NumPy and
+Grain input paths retain Reverb's native TensorFlow dependency.
+
 ### Grain datasets
 
-Install `dm-reverb[grain]`, or depend on `@reverb//reverb:grain`. Grain `0.2.18` requires Python `3.11` or later.
-Importing `reverb` does not import Grain.
+Install `dm-reverb[grain,jax]`, or depend on `@reverb//reverb:grain` and
+`@reverb//reverb:jax`. Grain `0.2.18` requires Python `3.11` or later.
+Importing `reverb` does not import Grain or JAX.
 
 ```python
 from reverb import grain as reverb_grain

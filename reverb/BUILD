@@ -438,6 +438,14 @@ reverb_py_test(
     ],
 )
 
+reverb_pytype_library(
+    name = "jax",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":reverb",
+        "@pypi//jax",
+    ],
+)
 
 reverb_pytype_library(
     name = "grain",
@@ -459,5 +467,14 @@ reverb_py_test(
         ":grain",
         ":reverb",
         "@pypi//grain",
+    ],
+)
+
+reverb_py_test(
+    name = "jax_iterator_test",
+    srcs = ["jax_iterator_test.py"],
+    deps = [
+        ":reverb",
+        "@pypi//jax",
     ],
 )
