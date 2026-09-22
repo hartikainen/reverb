@@ -576,12 +576,32 @@ absl::Status Sampler::GetNextTrajectory(
 
 absl::Status Sampler::GetNextTrajectoryBatch(
     int batch_size, std::vector<tensorflow::Tensor>* data) {
+  return GetNextBatch(batch_size, false, data);
+}
+
+absl::Status Sampler::GetNextTimestepBatch(
+    int batch_size, std::vector<tensorflow::Tensor>* data) {
+  return GetNextBatch(batch_size, true, data);
+}
+
+absl::Status Sampler::GetNextBatch(
+    int batch_size, bool timesteps, std::vector<tensorflow::Tensor>* data) {
   if (batch_size <= 0) {
     return absl::InvalidArgumentError("`batch_size` must be positive.");
   }
   std::vector<tensorflow::Tensor> sample;
   std::shared_ptr<const SampleInfo> info;
-  REVERB_RETURN_IF_ERROR(GetNextTrajectory(&sample, &info));
+  auto next = [&]() {
+    bool end_of_sequence;
+    return timesteps ? GetNextTimestep(&sample, &end_of_sequence, &info)
+                     : GetNextTrajectory(&sample, &info);
+  };
+  auto status = next();
+  if (timesteps && absl::IsOutOfRange(status)) {
+    data->clear();
+    return absl::OkStatus();
+  }
+  REVERB_RETURN_IF_ERROR(status);
 
   std::vector<tensorflow::Tensor> batch;
   batch.reserve(kNumInfoTensors + sample.size());
@@ -599,7 +619,12 @@ absl::Status Sampler::GetNextTrajectoryBatch(
 
   for (int row = 0; row < batch_size; ++row) {
     if (row != 0) {
-      REVERB_RETURN_IF_ERROR(GetNextTrajectory(&sample, &info));
+      status = next();
+      if (timesteps && absl::IsOutOfRange(status)) {
+        for (auto& column : batch) column = column.Slice(0, row);
+        break;
+      }
+      REVERB_RETURN_IF_ERROR(status);
     }
     if (sample.size() != shapes.size()) {
       return absl::InvalidArgumentError(

@@ -30,8 +30,7 @@
 #include "reverb/cc/schema.pb.h"
 #include "reverb/cc/trajectory_writer.h"
 #include "tensorflow/core/framework/tensor.h"
-
-// TODO(sabela): Add more documentation.
+#include "tensorflow/core/framework/tensor_util.h"
 
 namespace deepmind {
 namespace reverb {
@@ -48,18 +47,18 @@ class QueueWriter : public ColumnWriter {
   // See `ColumnWriter::Append`.
   absl::Status Append(
       std::vector<absl::optional<tensorflow::Tensor>> data,
-      std::vector<absl::optional<std::weak_ptr<CellRef>>>* refs);
+      std::vector<absl::optional<std::weak_ptr<CellRef>>>* refs) override;
 
   // See `ColumnWriter::AppendPartial`.
   absl::Status AppendPartial(
       std::vector<absl::optional<tensorflow::Tensor>> data,
-      std::vector<absl::optional<std::weak_ptr<CellRef>>>* refs);
+      std::vector<absl::optional<std::weak_ptr<CellRef>>>* refs) override;
 
   // See `ColumnWriter::CreateItem`. `unused_table` and `unused_priority` are
   // ignored.
   absl::Status CreateItem(absl::string_view unused_table,
                           double unused_priority,
-                          absl::Span<const TrajectoryColumn> trajectory);
+                          absl::Span<const TrajectoryColumn> trajectory) override;
 
   // See `ColumnWriter::Flush`. In this writer, there is nothing to send so this
   // is a no-op.

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <cstddef>
+#include <deque>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -39,6 +40,7 @@
 #include "reverb/cc/platform/server.h"
 #include "reverb/cc/rate_limiter.h"
 #include "reverb/cc/sampler.h"
+#include "reverb/cc/ops/queue_writer.h"
 #include "reverb/cc/selectors/fifo.h"
 #include "reverb/cc/selectors/heap.h"
 #include "reverb/cc/selectors/interface.h"
@@ -106,6 +108,41 @@ class WeakCellRef {
 
  private:
   std::weak_ptr<::deepmind::reverb::CellRef> ref_;
+};
+
+class PatternWriter {
+ public:
+  PatternWriter(const std::vector<std::string>& serialized, int history) {
+    using namespace deepmind::reverb;
+    if (history <= 0 || serialized.empty()) {
+      throw pybind11::value_error("Patterns and positive history are required.");
+    }
+    std::vector<StructuredWriterConfig> configs;
+    for (const auto& value : serialized) {
+      StructuredWriterConfig config;
+      if (!config.ParseFromString(value)) {
+        throw pybind11::value_error("Invalid serialized pattern.");
+      }
+      MaybeRaiseFromStatus(ValidateStructuredWriterConfig(config));
+      configs.push_back(std::move(config));
+    }
+    writer_ = std::make_unique<StructuredWriter>(
+        std::make_unique<QueueWriter>(history, &queue_), std::move(configs));
+  }
+
+  std::deque<std::vector<tensorflow::Tensor>> Append(
+      std::vector<absl::optional<tensorflow::Tensor>> data,
+      bool end_episode, bool clear_buffers) {
+    MaybeRaiseFromStatus(writer_->Append(std::move(data)));
+    if (end_episode) MaybeRaiseFromStatus(writer_->EndEpisode(clear_buffers));
+    std::deque<std::vector<tensorflow::Tensor>> result;
+    result.swap(queue_);
+    return result;
+  }
+
+ private:
+  std::deque<std::vector<tensorflow::Tensor>> queue_;
+  std::unique_ptr<deepmind::reverb::StructuredWriter> writer_;
 };
 
 }  // namespace
@@ -317,6 +354,10 @@ PYBIND11_MODULE(libpybind, m) {
       .def("__repr__", &Writer::DebugString,
            py::call_guard<py::gil_scoped_release>());
 
+  py::class_<PatternWriter>(m, "PatternWriter")
+      .def(py::init<const std::vector<std::string>&, int>())
+      .def("Append", &PatternWriter::Append);
+
   py::class_<Sampler>(m, "Sampler")
       .def("Close", &Sampler::Close, py::call_guard<py::gil_scoped_release>())
       .def("GetNextTrajectory",
@@ -350,6 +391,23 @@ PYBIND11_MODULE(libpybind, m) {
              {
                py::gil_scoped_release release;
                status = sampler->GetNextTrajectoryBatch(batch_size, &data);
+             }
+             if (absl::IsDeadlineExceeded(status)) {
+               PyErr_SetString(py::module_::import("reverb.errors")
+                                   .attr("DeadlineExceededError").ptr(),
+                               std::string(status.message()).c_str());
+               throw py::error_already_set();
+             }
+             MaybeRaiseFromStatus(status);
+             return data;
+           }, py::arg("batch_size"))
+      .def("GetNextTimestepBatch",
+           [](Sampler* sampler, int batch_size) {
+             absl::Status status;
+             std::vector<tensorflow::Tensor> data;
+             {
+               py::gil_scoped_release release;
+               status = sampler->GetNextTimestepBatch(batch_size, &data);
              }
              if (absl::IsDeadlineExceeded(status)) {
                PyErr_SetString(py::module_::import("reverb.errors")

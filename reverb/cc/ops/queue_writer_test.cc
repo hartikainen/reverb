@@ -36,8 +36,7 @@
 #include "reverb/cc/support/signature.h"
 #include "reverb/cc/trajectory_writer.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/framework/tensor_shape.h"
-#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/tensor_util.h"
 
 namespace deepmind {
 namespace reverb {

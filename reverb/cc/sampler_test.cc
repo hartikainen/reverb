@@ -366,6 +366,36 @@ TEST(GrpcSamplerTest, TrajectoryBatchPreservesValuesAndMetadata) {
             absl::StatusCode::kOutOfRange);
 }
 
+TEST(GrpcSamplerTest, TimestepBatchSpansItemsAndReturnsRemainder) {
+  auto first = MakeResponse(2);
+  auto second = MakeResponse(3);
+  first.mutable_entries(0)->mutable_info()->mutable_item()->set_key(7);
+  second.mutable_entries(0)->mutable_info()->mutable_item()->set_key(9);
+  Sampler sampler(MakeGoodStub({first, second}), "table", {2, 2, 1});
+  std::vector<tensorflow::Tensor> batch;
+  REVERB_ASSERT_OK(sampler.GetNextTimestepBatch(3, &batch));
+  ASSERT_THAT(batch, SizeIs(6));
+  EXPECT_EQ(batch[5].shape(), tensorflow::TensorShape({3, 2}));
+  EXPECT_EQ(batch[0].flat<uint64_t>()(0), 7);
+  EXPECT_EQ(batch[0].flat<uint64_t>()(1), 7);
+  EXPECT_EQ(batch[0].flat<uint64_t>()(2), 9);
+  ExpectTensorEqual<uint64_t>(tensorflow::tensor::DeepCopy(batch[5].SubSlice(2)), MakeTensor(3).SubSlice(0));
+  REVERB_ASSERT_OK(sampler.GetNextTimestepBatch(3, &batch));
+  EXPECT_EQ(batch[5].shape(), tensorflow::TensorShape({2, 2}));
+  ExpectTensorEqual<uint64_t>(batch[5], tensorflow::tensor::DeepCopy(MakeTensor(3).Slice(1, 3)));
+  REVERB_ASSERT_OK(sampler.GetNextTimestepBatch(3, &batch));
+  EXPECT_TRUE(batch.empty());
+}
+
+TEST(GrpcSamplerTest, TimestepBatchRejectsInvalidSizeWithoutConsuming) {
+  Sampler sampler(MakeGoodStub({MakeResponse(2)}), "table", {1, 1, 1});
+  std::vector<tensorflow::Tensor> batch;
+  EXPECT_EQ(sampler.GetNextTimestepBatch(0, &batch).code(),
+            absl::StatusCode::kInvalidArgument);
+  REVERB_ASSERT_OK(sampler.GetNextTimestepBatch(2, &batch));
+  ExpectTensorEqual<uint64_t>(batch[5], MakeTensor(2));
+}
+
 TEST(GrpcSamplerTest, InvalidBatchSizeDoesNotConsumeSamples) {
   Sampler sampler(MakeGoodStub({MakeResponse(1)}), "table", {1, 1, 1});
   std::vector<tensorflow::Tensor> batch;

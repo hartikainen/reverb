@@ -298,6 +298,11 @@ class Sampler {
   absl::Status GetNextTrajectoryBatch(
       int batch_size, std::vector<tensorflow::Tensor>* data);
 
+  // Returns up to `batch_size` timesteps, stopping at the item limit.
+  // An empty result marks exhaustion. Metadata repeats for each item's steps.
+  absl::Status GetNextTimestepBatch(
+      int batch_size, std::vector<tensorflow::Tensor>* data);
+
   // Cancels all workers and joins their threads. Any blocking or future call
   // to `GetNextTimestep` or `GetNextTrajectory` will return CancelledError
   // without blocking.
@@ -308,6 +313,9 @@ class Sampler {
   Sampler& operator=(const Sampler&) = delete;
 
  private:
+  absl::Status GetNextBatch(int batch_size, bool timesteps,
+                            std::vector<tensorflow::Tensor>* data);
+
   Sampler(std::vector<std::unique_ptr<SamplerWorker>>, const std::string& table,
           const Options& options, internal::DtypesAndShapes dtypes_and_shapes);
 
