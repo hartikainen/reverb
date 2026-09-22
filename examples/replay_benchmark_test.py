@@ -44,6 +44,12 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(report['status'], 'measured')
         self.assertGreater(report['median_elements_per_second'], 0)
 
+  def test_prefetch_without_separate_host_queue(self):
+    report = replay_benchmark.run(self.args(
+        '--consumer=prefetch', '--host-prefetch-batches=0'))
+    self.assertEqual(report['status'], 'measured')
+    self.assertEqual(report['config']['host_prefetch_batches'], 0)
+
   def test_grpc_fixture(self):
     report = replay_benchmark.run(self.args('--transport=grpc'))
     self.assertEqual(report['status'], 'measured')

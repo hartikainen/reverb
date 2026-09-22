@@ -39,6 +39,50 @@ class Source:
 
 
 class InputPipelineTest(unittest.TestCase):
+  def test_host_production_overlaps_device_transfer(self):
+    produced_second = threading.Event()
+    transfer_entered = threading.Event()
+    finish_transfer = threading.Event()
+    class Host(Source):
+      def __next__(self):
+        value = super().__next__()
+        if self.calls == 2:
+          produced_second.set()
+        return value
+    def transfer(value):
+      transfer_entered.set()
+      if not finish_transfer.wait(10):
+        raise TimeoutError('Transfer was not released')
+      return value
+    source = Host(4)
+    with input_pipeline.prefetch_to_device(
+        source, depth=1, host_depth=1, transform=transfer) as batches:
+      try:
+        self.assertTrue(transfer_entered.wait(10))
+        self.assertTrue(produced_second.wait(10))
+      finally:
+        finish_transfer.set()
+      values = [float(batch[0, 0, 0]) for batch in batches]
+    np.testing.assert_allclose(values, [.1, .2, .3, .4])
+    self.assertTrue(source.closed)
+
+  def test_staged_close_cancels_blocked_host(self):
+    entered = threading.Event()
+    released = threading.Event()
+    class Blocked:
+      def __next__(self):
+        entered.set()
+        if not released.wait(10):
+          raise TimeoutError('Source cancellation failed')
+        raise StopIteration
+      def close(self):
+        released.set()
+    with input_pipeline.prefetch_to_device(Blocked()) as batches:
+      self.assertTrue(entered.wait(10))
+    self.assertTrue(released.is_set())
+    with self.assertRaises(StopIteration):
+      next(batches)
+
   def test_prefetch_preserves_order_and_exhaustion(self):
     source = Source(4)
     with input_pipeline.Prefetch(source, depth=2) as batches:

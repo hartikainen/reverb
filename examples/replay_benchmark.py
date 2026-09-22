@@ -196,10 +196,12 @@ def measure(args, address):
       if args.consumer in ('learner', 'prefetch'):
         step = input_pipeline.compile_step(spec)
       jax.block_until_ready(params)
-      if args.consumer in ('prefetch', 'callback'):
-        transform = (jax.device_put if args.consumer == 'prefetch' else lambda x: x)
+      if args.consumer == 'prefetch':
+        source = stack.enter_context(input_pipeline.prefetch_to_device(
+            source, args.prefetch_batches, host_depth=args.host_prefetch_batches))
+      elif args.consumer == 'callback':
         source = stack.enter_context(input_pipeline.Prefetch(
-            source, args.prefetch_batches, transform))
+            source, args.prefetch_batches))
 
     def read():
       start = time.perf_counter()
@@ -309,7 +311,8 @@ def parse_args(argv=None):
   parser.add_argument('--transport', choices=['local', 'grpc'], default='grpc')
   for name, default in [('batch-size', 64), ('length', 32), ('width', 128),
                         ('items', 128), ('workers', 1), ('in-flight', 128),
-                        ('prefetch-batches', 2), ('batches', 4096), ('warmup', 128),
+                        ('prefetch-batches', 2), ('host-prefetch-batches', 2),
+                        ('batches', 4096), ('warmup', 128),
                         ('trials', 5), ('sync-every', 16), ('tf-threads', 2),
                         ('episode-length', 128)]:
     parser.add_argument('--' + name, type=int, default=default)
@@ -318,8 +321,10 @@ def parse_args(argv=None):
   parser.add_argument('--output', default=None)
   args = parser.parse_args(argv)
   for name, value in vars(args).items():
-    if isinstance(value, int) and name != 'seed' and value < 1:
+    if isinstance(value, int) and name not in ('seed', 'host_prefetch_batches') and value < 1:
       parser.error(f'`{name}` must be positive')
+  if args.host_prefetch_batches < 0:
+    parser.error('`host_prefetch_batches` must be nonnegative')
   if args.min_seconds <= 0:
     parser.error('`min_seconds` must be positive')
   if args.episode_length < args.length:

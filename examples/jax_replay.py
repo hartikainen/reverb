@@ -55,8 +55,9 @@ def run(pattern='prefetch', steps=100, batch_size=64, length=32,
       else:
         step = input_pipeline.compile_step(
             spec, sharding if pattern == 'sharded' else None)
-        batches = stack.enter_context(input_pipeline.Prefetch(
-            source, depth, lambda data: jax.device_put(data, sharding)))
+        batches = stack.enter_context(input_pipeline.prefetch_to_device(
+            source, depth, host_depth=depth,
+            transform=lambda data: jax.device_put(data, sharding)))
         for index in range(steps):
           params, loss = step(params, next(batches))
           if (index + 1) % depth == 0:

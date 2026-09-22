@@ -563,9 +563,10 @@ Dataset sampling runs on the host while the compiled learner runs on the device.
 ### Runnable input examples and throughput benchmarks
 
 `//examples:jax_replay` trains a linear predictor from a populated replay table.
-The `prefetch` pattern prepares device batches on a bounded host worker while
-`jax.jit` executes the learner. The `sharded` pattern splits the batch across
-local devices with `NamedSharding` and replicates the model parameters. Both
+The `prefetch` pattern uses separate bounded queues for host batch production
+and device transfer while `jax.jit` executes the learner. The `sharded` pattern
+splits the batch across local devices with `NamedSharding` and replicates the
+model parameters. Both
 patterns require fixed batch shapes. The examples support a single JAX process.
 
 ```sh
@@ -601,6 +602,10 @@ Selecting `numpy-timestep` or
 use the corresponding `grain-*` adapters to measure timestep and pattern inputs.
 Pattern measurements apply sliding windows to local episodes, with episode
 boundaries respected. They do not measure replay server sampling.
+The `prefetch` consumer uses the same host and device queues for every adapter.
+`--host-prefetch-batches` bounds the host queue, and `--prefetch-batches` bounds
+the device queue. Set `--host-prefetch-batches=0` to produce and transfer batches
+on the same worker.
 
 ```sh
 bazel run //examples:replay_benchmark -- \

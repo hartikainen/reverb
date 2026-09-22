@@ -16,6 +16,7 @@
 
 import collections
 import concurrent.futures
+import contextlib
 import threading
 
 import jax
@@ -71,6 +72,17 @@ class Prefetch:
 
   def __exit__(self, *_):
     self.close()
+
+
+@contextlib.contextmanager
+def prefetch_to_device(source, depth=2, *, host_depth=2, transform=jax.device_put):
+  """Overlap host batch production, device transfer, and learner execution."""
+  with contextlib.ExitStack() as stack:
+    if host_depth < 0:
+      raise ValueError('`host_depth` must be nonnegative')
+    if host_depth:
+      source = stack.enter_context(Prefetch(source, host_depth))
+    yield stack.enter_context(Prefetch(source, depth, transform))
 
 
 def update(params, data):

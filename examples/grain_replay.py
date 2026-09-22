@@ -41,7 +41,8 @@ def run(steps=100, batch_size=64, length=32, width=128, depth=2,
   with replay_fixture.replay_server(replay_fixture.Fixture(length, width)) as address:
     source = replay_grain.TrajectoryDataset(
         address, 'bench', batch_size, max_samples=steps * batch_size)
-    prepared = source.map(lambda sample: replay_sample.ReplaySample(
+    host = replay_grain.prefetch(source, depth)
+    prepared = host.map(lambda sample: replay_sample.ReplaySample(
         sample.info, jax.device_put(sample.data[0], placement)))
     with iter(replay_grain.prefetch(prepared, depth)) as batches:
       try:
